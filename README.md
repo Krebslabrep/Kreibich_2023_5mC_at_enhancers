@@ -1,17 +1,13 @@
-# Kreibich_2022_5mC-CA-association
+# Kreibich et al., 2023 - The regulation of enhancers by DNA methylation
 
 # Introduction
-This GitHub repository contains all primary code to reproduce the analyses for the publication "Single molecule footprinting identifies context-dependent regulation of enhancers by DNA methylation" [Kreibich et al., 2022, bioRxiv](https://doi.org/10.1101/2022.05.19.492653), from the [Krebs laboratory](https://www.embl.de/research/units/genome_biology/krebs/index.html).
+This GitHub repository contains all primary code to reproduce the main analyses for the publication "Single molecule footprinting identifies context-dependent regulation of enhancers by DNA methylation" [Kreibich et al., 2022, bioRxiv](https://doi.org/10.1101/2022.05.19.492653), from the [Krebs laboratory](https://www.embl.de/research/units/genome_biology/krebs/index.html).
 
 In this publication, we use Single Molecule Footprinting (SMF) to measure chromatin accessibility (CA), transcription factor (TF) binding and endogenous DNA methylation (5mC) simultaneously at the same single DNA molecules. This enables us to analyze the molecular relationship between these gene regulatory features.  
 SMF is a high-throughput sequencing technology developed in the [Krebs laboratory](https://www.embl.de/research/units/genome_biology/krebs/index.html). It consists of marking accessible genomic cytosines in the GpC context using a exogenous methytransferase and subsequent bisulfite sequencing (BS). Consequently, GpCs protected by the binding of DNA-interacting proteins (e.g. TFs, nucleosomes, GTFs, etc.) will remain unmethylated, while the accessible cytosines will be methylated.
 In this project, we read out the cytosine methylation in CpG and GpC context independently for each DNA molecule at genomic bins of interest (101 bp bins or around TF binding sites (TFBS)). Those methylation scores are then used to determine the association between DNA methylation (CpG context) and chromatin accessibility or TF binding (GpC context) using a statistical test (Cochran-Mantel-Haenszel test).  
 
 Other analysis scripts in this repository include the analysis of Precision Run-On data (PRO-seq) and ChIP-seq data.  
-
-# Covered analyses
-* blabla
-* blabla
 
 # SMF Analyses strategies
 To exclude ambigious cytosine methylation calls (e.g. GCGs), we use more stringent cytosine contexts:  
@@ -33,6 +29,13 @@ A more detailed schematic view of this analysis can be found in Figure S1H of th
 * We then perform a Cochran-Mantel-Haenszel test to associate the CpG methylation of the center bin CpG with the TF bound or nucleosome bound fraction.
 * For TFBS the JASPAR 2018 database is used and curated using ChIP-seq data.
 * For more information on SMF analysis of TFBS, see [Kleinendorst and Barzaghi et al., 2022]() and [Soenmezer et al., 2022]().
+
+# Covered analyses
+Scripts for the following analyses are provided:
+* Single molecule methylation call - CA strategy 
+* blabla
+
+
 
 
 # Preamble: preprocessing SMF data
