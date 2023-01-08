@@ -22,7 +22,7 @@ In general, the SMF analysis is performed with two strategies: (1) Chromatin acc
 * We then perform a Cochran-Mantel-Haenszel test to associate the CpG methylation of the center CpG with the accessible or inaccessible fraction.
 
 A more detailed schematic view of this analysis can be found in Figure S1H of the manuscript and is also shown here:  
-*INSERT PICTURE*
+![Kreibich et al, 2023. Figure S1H - Schematic description of CA analysis strategy](Figure_S1H_Analysis_scheme.png)
 
 **(2) Transcription factor binding site (TFBS) analysis**
 * Here, we center a 30 bp center bin at TFBS that contains at least one CpG. In addition 2 neighboring X bp bins up- and downstream are created. The GpC methylation within tose three bins is used to determine the binding state of the TFBS (TF bound, accessible, nucleosome bound).
