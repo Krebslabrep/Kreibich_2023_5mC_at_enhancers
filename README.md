@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/485833752.svg)](https://zenodo.org/badge/latestdoi/485833752)
+
 # Kreibich et al., 2023 - The regulation of enhancers by DNA methylation
 
 # Introduction
