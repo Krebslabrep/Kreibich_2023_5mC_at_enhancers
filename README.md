@@ -33,6 +33,7 @@ A more detailed schematic view of this analysis can be found in Figure S1H of th
 
 ## Folder structure
 
+```bash
 Kreibich_2023_5mC_at_enhancers
 |
 |__scripts
@@ -46,11 +47,10 @@ Kreibich_2023_5mC_at_enhancers
     |__single_molecule_call (created)
     |
     |__plots (created)  
-
+```
 
 ## Order of scripts
-### CA analysis
-#### Wild type ES data
+### CA analysis - WT ES data
 
 1. [Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r](scripts/Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r)  
     * Use [run_single_molecule_meth_call.sh](scripts/run_single_molecule_meth_call.sh) to run on cluster  
@@ -84,9 +84,7 @@ Kreibich_2023_5mC_at_enhancers
     * Functions are based on the R package [SingleMoleculeFootprinting](https://bioconductor.org/packages/release/bioc/html/SingleMoleculeFootprinting.html). Find more information about SMF plotting there.  
      
 
-\
-
-#### F1 data
+### CA analysis - F1 data
 
 1. [Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r](scripts/Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r)  
     * Use [run_single_molecule_meth_call.sh](scripts/run_single_molecule_meth_call.sh) to run on cluster  
@@ -106,9 +104,8 @@ Kreibich_2023_5mC_at_enhancers
 4. [Analysis_CA_CMH_F1_ICRs.Rmd](scripts/Analysis_CA_CMH_F1_ICRs.Rmd)  
     * Performes comparative analysis between ICRs and non-ICR negative 5mC-CA-association sites.   
 
-\
 
-#### 5mC perturbation assay
+### CA analysis - 5mC perturbation assay
 In addition to the WT ES analysis (1.-5.) run the following scripts: 
 
 1. [Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r](scripts/Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r)  
@@ -131,9 +128,7 @@ In addition to the WT ES analysis (1.-5.) run the following scripts:
     * Functions are based on the R package [SingleMoleculeFootprinting](https://bioconductor.org/packages/release/bioc/html/SingleMoleculeFootprinting.html). Find more information about SMF plotting there.  
      
 
-\
-
-#### Somatic cell lines
+### CA analysis - Somatic cell lines
 Run first scripts as described for WT ES data:
 
 1. [Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r](scripts/Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r)  
@@ -158,9 +153,7 @@ Run first scripts as described for WT ES data:
     * Functions are based on the R package [SingleMoleculeFootprinting](https://bioconductor.org/packages/release/bioc/html/SingleMoleculeFootprinting.html). Find more information about SMF plotting there.  
        
 
-\
-
-### TFBS analysis  
+### TFBS analysis
 1. [Single_molecule_methylation_call_CG_GC_WG_MM_TFcentered_EK2022.r](scripts/Single_molecule_methylation_call_CG_GC_WG_MM_TFcentered_EK2022.r)  
     * Using [run_single_molecule_meth_call.sh](scripts/run_single_molecule_meth_call.sh) to run on cluster.  
 
@@ -176,7 +169,6 @@ Run first scripts as described for WT ES data:
     * For WT ES cells: [Make_Final_TF_CMH_data_tibbles_ES_only.Rmd](scripts/Make_Final_TF_CMH_data_tibbles_ES_only.Rmd)  
     * For WT somatic cells: [Make_Final_TF_CMH_data_tibbles_somatic_cell_line.Rmd](scripts/Make_Final_TF_CMH_data_tibbles_somatic_cell_line.Rmd)  
 
-
 4. [Analysis_TFBS_CMH_ES_5mCvsBinding.Rmd](scripts/Analysis_TFBS_CMH_ES_5mCvsBinding.Rmd)  
     * Performes analysis of WT 5mC-TF-association, methylation and state distribution for TFs of interest in an RMarkdown notebook and saves the important plots.  
 
@@ -187,8 +179,6 @@ Run first scripts as described for WT ES data:
     * Plot single locus example of SMF data with TKOs. 
     * Functions are based on the R package [SingleMoleculeFootprinting](https://bioconductor.org/packages/release/bioc/html/SingleMoleculeFootprinting.html). Find more information about SMF plotting there.  
 
-
-\
 
 ## R packages needed (not all needed for all scripts):
 
@@ -231,7 +221,6 @@ Run first scripts as described for WT ES data:
 * 'chromHMM_30bp_TFBS_with_clusters.rds' --> [Make_chromHMM_annotations_TFBS_tibble.r](scripts/Make_chromHMM_annotations_TFBS_tibble.r)  
 * 'chromHMM_annotations_bins.rds' --> [Make_chromHMM_annotations_bins_tibble.r](scripts/Make_chromHMM_annotations_bins_tibble.r)  
 
-\
 
 ## Preparatory work
 Before starting running the script, you have to do the following:  
@@ -243,7 +232,6 @@ Before starting running the script, you have to do the following:
 - Install R packages  
 - unzip zipped files in data directory  
 
-\
 
 ## Preamble: preprocessing SMF data
 To ensure compatibility with our downstream tools, we recommend aligning sequencing reads using the QuasR function [qAlign](https://www.rdocumentation.org/packages/QuasR/versions/1.12.0/topics/qAlign) as follows
@@ -263,7 +251,6 @@ prj = QuasR::qAlign(sampleFile = sampleFile,
 For more details on how to structure the **sampleFile** argument we refer to the [qAlign](https://www.rdocumentation.org/packages/QuasR/versions/1.12.0/topics/qAlign) documentation.
 For more details on SMF data preprocessing we refer to the computational steps of our SMF methods manuscript [Kleinendorst and Barzaghi et al., 2022](https://doi.org/10.1038/s41596-021-00630-1).
 
-\
 
 # Descriptions of the analyses
-More detailed descriptions of the individual analyses can be found in the STAR methods section of the publication [Kreibich et al., 2022, bioRxiv](https://doi.org/10.1101/2022.05.19.492653).
+More detailed descriptions of the individual analyses can be found in the methods section of the publication [Kreibich et al., 2022, bioRxiv](https://doi.org/10.1101/2022.05.19.492653).
