@@ -1,0 +1,978 @@
+---
+title: "Chromatin accessibility vs 5mC analysis - using Cochran-Mantel-Haenszel test"
+author: "Elisa Kreibich"
+date: "29/10/2022"
+
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+  # html_document:
+  #   toc: true
+  #   toc_float: true
+  #   code_folding: hide
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+Analysis of SMF WT data to identify antagonist and neutral sites, characterize them.  
+
+### Input
+**Files needed to run this script and which scripts to run to create those:**
+
+| Input file name | Information | Script to create |
+|:----------------|:------------|:-----------------|
+| Final_data_tibble_CA_***DATE*** _SMF_MM_***SAMPLENAME***_***REPLICATES*** _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF***_ full_fractions.rds | Full final tibble without states, but with full fractions (acc/inacc) and all 5mC rates | Make_Final_CG_CMH_data_tibbles_cell_line.Rmd |  
+| Final_data_tibble_CA_***DATE*** _SMF_MM_***SAMPLENAME***_***REPLICATES*** _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF***_ states.rds | Final tibble with states and all 5mC rates | Make_Final_CG_CMH_data_tibbles_cell_line.Rmd |  
+| Final_data_tibble_CA_***DATE*** _SMF_MM_***SAMPLENAME***_***REPLICATES*** _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF*** _states_gr.rds | GRange object of final tibble above | Make_Final_CG_CMH_data_tibbles_cell_line.Rmd |  
+
+Example file names:
+Final_data_tibble_CA_2023-01-01_SMF_MM_ES_NO_R1_R2_R5a6_cObin10_cOCMH30_full_fractions.rds
+Final_data_tibble_CA_2023-01-01_SMF_MM_ES_NO_R1_R2_R5a6_cObin10_cOCMH30_states.rds 
+Final_data_tibble_CA_2023-01-01_SMF_MM_ES_NO_R1_R2_R5a6_cObin10_cOCMH30_states_gr.rds   
+
+\
+
+### Output
+Plots of the following analyses:  
+
+* **Analysis #1:** First plots on global numbers (coverage, methylation and 5mC and CA in fractions)
+* **Analysis #2:** Quick checks on numbers in states (coverage, 5mC distribution, numbers, p value)
+* **Analysis #3:** CMH test analysis and characterization of states
+  * Volcano plots of CMH test for Chromatin Accessibility (CA) vs 5mC
+  * Characterization of sites:
+      * chromHMM annotation
+      * CpG density
+      * Chromatin accessibility
+      * 5mC
+
+\
+
+### State definitions
+**States are defined as followed:**  
+
+* **state** 
+    * antagonist: COR <= 0.5 | pvalue < 0.05 | ICR == FALSE 
+    * neutral: COR > 0.5 | no pvalue cutoff | ICR == FALSE 
+    * agonist: COR >= 2 | pvalue < 0.05 | ICR == FALSE
+    * ICR: ICR == TRUE
+
+* **state2**
+    * antagonist: COR <= 0.5 | pvalue < 0.05 | ICR == FALSE  
+    * neutral+: COR > 0.9 & < 1.1 | no pvalue cutoff | ICR == FALSE 
+    * neutral: COR > 0.5 | no pvalue cutoff | ICR == FALSE 
+    * agonist: COR >= 2 | pvalue < 0.05 | ICR == FALSE
+    * ICR: ICR == TRUE
+
+* **state0**
+    * antagonist: COR <= 0.5 | pvalue < 0.05
+    * neutral: COR > 0.5 | no pvalue cutoff  
+    * agonist: COR >= 2 | pvalue < 0.05
+
+\
+
+### Additional information on this version:  
+
+* 101 bp collection window around CpG  
+* 10x coverage cutoff per bin for NWCGW and DGCHN methylation  
+* 30x coverage cutoff for SM analysis  
+* bins most be covered by at least 2 replicates  
+* average methylation (\*\_wmean_me\_\*) == weighted mean (wmean) of all replicates  
+* average accessibility (\*\_wmean_acc\_\*) == mean of GpC methylation in bin + weighted mean (wmean) of all replicates  
+
+\
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r load libraries, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(patchwork))
+suppressPackageStartupMessages(library(BSgenome.Mmusculus.UCSC.mm10))
+
+source(paste0(WD, 'scripts/utilities/COLORS.R'))
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_CA.R'))
+```
+
+### Set arguments
+```{r arguments}
+INDIR           <- 'data_results/single_molecule_call/')'
+OUTDIR          <- 'data_results/plots/'
+dir.create(OUTDIR)
+
+DATE            <- Sys.Date()
+
+#Arguments for WT input data set
+SAMPLE_OI       <- "ES"
+SAMPLE_OI_full  <- "ES_NO"
+
+INPUT_DATES     <- c("2022-10-21")  #Date of Final WT tibble creation
+```
+
+### Load data
+#### Final data tibble with and without states
+```{r}
+files   <- list.files(path = paste0(WD, INDIR),
+                    pattern = paste0("^Final_data_tibble_CA_"),
+                    full.names = TRUE)
+files   <- files[grepl(paste(SAMPLE_OI_full, collapse = "|"), files)]
+files   <- files[grepl(paste(INPUT_DATES, collapse = "|"), files)]
+
+data_full_uf    <- readRDS(files[grepl(paste0("cObin", cO_bin,"_full_fractions.rds"), files)])
+data_states     <- readRDS(files[grepl(paste0("cObin", cO_bin, "_cOCMH", cO_CMH,"_states.rds"), files)])
+data_states_gr  <- readRDS(files[grepl(paste0("cObin", cO_bin, "_cOCMH", cO_CMH,"_states_gr.rds"), files)])
+```
+
+**Tibble mutations - full without states**
+```{r}
+var <- paste0(SAMPLE_OI_full, "_wmean_me_bin")
+
+data_full_uf <- data_full_uf %>% 
+  mutate(inter5mC = case_when(
+    between(get(var), AVME.i.1, AVME.i.2) ~ TRUE,
+    TRUE ~ FALSE))
+
+data_full_uf_uni <- data_full_uf %>%
+  distinct(bin, .keep_all = TRUE)
+
+#Filter for intermediate mean methylation and calculate fraction delta for CA and 5mC
+var1 <- paste0(SAMPLE_OI_full, "_mean_cov_bin")
+var2 <- paste0(SAMPLE_OI_full, "_wmean_me_fraction")
+var3 <- paste0(SAMPLE_OI_full, "_wmean_acc_fraction")
+
+data_full_f <- data_full_uf %>% 
+  filter(get(var1) >= cO_bin) %>% 
+  filter(inter5mC == TRUE)
+
+  ##Calculate fraction delta
+  data_full_f.1 <- data_full_f %>% 
+    dplyr::select(bin, fraction, contains(var2)) %>% 
+    pivot_wider(names_from = fraction, names_prefix = "fraction_", values_from = contains(var2)) %>% 
+    mutate(wmean_me_fraction_delta = fraction_0-fraction_1) %>% 
+    dplyr::select(-starts_with("fraction"))
+  
+  data_full_f.2 <- data_full_f %>% 
+    dplyr::select(bin, fraction, contains(var3)) %>% 
+    pivot_wider(names_from = fraction, names_prefix = "fraction_", values_from = contains(var3)) %>% 
+    mutate(wmean_acc_fraction_delta = fraction_0-fraction_1) %>% 
+    dplyr::select(-starts_with("fraction"))
+    
+  data_full_f <- data_full_f %>% left_join(., data_full_f.1) %>% left_join(., data_full_f.2)
+```
+
+**Tibble mutations - with states**
+```{r}
+# Here we are only interested in the intermediate methylation, but the data tibble still contains high_5mC and low_5mC states
+var <- paste0(SAMPLE_OI_full, "_wmean_me_bin")
+
+data <- data_states %>% 
+  filter(dplyr::between(get(var), AVME.i.1, AVME.i.2))
+
+i.intMe <- elementMetadata(data_states_gr)[,grepl(var, names(elementMetadata(data_states_gr)))]
+i.intMe <- i.intMe >= AVME.i.1 & i.intMe <= AVME.i.2
+data_states_gr <- data_states_gr[i.intMe,]
+
+# Filter out Inactive and CTCF annotations to focus on active regulatory regions
+data_f <- data %>%
+  filter(!(chromHMMcl %in% c("C1_CTCF", "C2_Inactive")))
+```
+
+
+## #1 Analysis - Full data
+### Coverage at CpGs per bin - ES
+```{r}
+var <- paste0(SAMPLE_OI_full, "_mean_cov_bin")
+median_cov <- data_full_uf_uni %>% pull(get(var)) %>% median()
+
+hist_cov <- data_full_uf_uni %>%
+  ggplot(aes(get(var))) +
+  # stat_bin(aes(y=..count../sum(..count..)), binwidth = 0.05, color = "black") +
+  stat_bin(aes(y=..count..), binwidth = 0.05, color = "black", fill = "grey70") +
+  geom_vline(xintercept = median(median_cov), color = "red", linetype = 2) +
+  scale_x_log10() +
+  theme_EK() +
+  labs(x = var,
+       caption = paste0("", nrow(data_full_uf_uni), "\nmedian = ", round(median_cov, 0)))
+
+hist_cov
+
+ggsave(plot = hist_cov, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_histo_plot_CpG_cov_v", DATE, ".pdf"), width = 4, height = 4)
+```
+
+### Coverage at GpCs per bin - ES
+```{r}
+var <- paste0(SAMPLE_OI_full, "_mean_acc_cov_bin")
+median_cov <- data_full_uf_uni %>% pull(get(var)) %>% median()
+
+hist_cov <- data_full_uf_uni %>%
+  ggplot(aes(get(var))) +
+  # stat_bin(aes(y=..count../sum(..count..)), binwidth = 0.05, color = "black") +
+  stat_bin(aes(y=..count..), binwidth = 0.05, color = "black", fill = "grey70") +
+  geom_vline(xintercept = median(median_cov), color = "red", linetype = 2) +
+  scale_x_log10() +
+  theme_EK() +
+  labs(x = var,
+       caption = paste0("", nrow(data_full_uf_uni), "\nmedian = ", round(median_cov, 0)))
+
+hist_cov
+
+ggsave(plot = hist_cov, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_histo_plot_GpC_cov_v", DATE, ".pdf"), width = 4, height = 4)
+```
+
+### 5mC col plot - before filtering
+```{r}
+var <- paste0(SAMPLE_OI_full, "_wmean_me_bin")
+
+plot_tbl <- data_full_uf_uni %>% 
+  dplyr::rename(meth = contains(var)) %>% 
+  mutate(me_cat = case_when(
+    dplyr::between(meth, 0,0.1) ~ "0-10",
+    dplyr::between(meth, 0.1,0.2) ~ "10-20",
+    dplyr::between(meth, 0.2,0.3) ~ "20-30",
+    dplyr::between(meth, 0.3,0.4) ~ "30-40",
+    dplyr::between(meth, 0.4,0.5) ~ "40-50",
+    dplyr::between(meth, 0.5,0.6) ~ "50-60",
+    dplyr::between(meth, 0.6,0.7) ~ "60-70",
+    dplyr::between(meth, 0.7,0.8) ~ "70-80",
+    dplyr::between(meth, 0.8,0.9) ~ "80-90",
+    dplyr::between(meth, 0.9,1) ~ "90-100"
+  )) %>% 
+  count(me_cat, name = "count") %>% 
+  add_count(wt = count, name = "sum") %>% 
+  mutate(ratio = count/sum)
+
+plot_col_SMF <- plot_tbl %>% 
+  ggplot(aes(me_cat, ratio)) +
+  geom_col(color = "black", fill = "grey70") +
+  geom_col(data = (plot_tbl %>% filter(me_cat %in% c("10-20", "20-30", "30-40", "40-50", "50-60"))), color = "black", fill = "black") +
+  # scale_x_continuous(breaks = seq(0,1,0.1), labels = label_number(scale = 1e2), expand = expansion(add = 0.02)) +
+  # scale_y_continuous(limits = c(0,0.3), breaks = c(0, 0.15, 0.3), expand = expansion(add = 0)) +
+  scale_y_continuous(breaks = c(0, 0.15, 0.3), expand = expansion(add = 0)) +
+  theme_EK() +
+  theme(panel.border = element_blank(),
+        axis.line = element_line(color = "black"),
+        axis.text.x = element_text(angle = 45)) +
+  labs(x = "5mC (%)",
+       y = "Fraction of NWCGWs (SMF data)",
+       caption = paste("n =", plot_tbl$sum[1]))
+
+
+plot_col_SMF
+ggsave(plot_col_SMF, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_col_plot_5mC_SMF_v", DATE, ".pdf"), width = 4, height = 3)
+```
+
+### ChromHMM annotation
+```{r}
+COLORS_ANNO <- c(
+  RColorBrewer::brewer.pal(5, name = "OrRd")[3],
+  RColorBrewer::brewer.pal(5, name = "PuRd")[3],
+  RColorBrewer::brewer.pal(5, name = "Greens")[3],
+  RColorBrewer::brewer.pal(5, name = "Greys")[3],
+  RColorBrewer::brewer.pal(3, name = "Blues")[3]
+) %>% rev()
+names(COLORS_ANNO) <- (pull(data, chromHMMcl) %>% unique() %>% sort())
+
+p_ano1 <- data_full_uf %>% 
+  distinct(bin, .keep_all = TRUE) %>% 
+  ggplot(aes("all", fill = chromHMMcl)) +
+  geom_bar(position="fill", stat="count") +
+  scale_fill_manual(values = COLORS_ANNO) +
+  scale_y_continuous(labels = label_number(scale = 1*100)) +
+  theme_EK() +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "count [%]")
+p_ano1
+
+p_ano2 <- data_full_uf %>% 
+  distinct(bin, .keep_all = TRUE) %>% 
+  filter(inter5mC == TRUE) %>% 
+  ggplot(aes("10-60% 5mC", fill = chromHMMcl)) +
+  geom_bar(position="fill", stat="count") +
+  scale_fill_manual(values = COLORS_ANNO) +
+  scale_y_continuous(labels = label_number(scale = 1*100), breaks = seq(0,1,0.5)) +
+  theme_EK() +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "count [%]")
+p_ano2
+
+p_ano_combi <- (p_ano1 & theme(legend.position = "none")) + p_ano2
+ggsave(plot = p_ano_combi, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_all_vs_intermed5mC_chromHMMcl_v", DATE, ".pdf"), width = 6, height = 3)
+```
+\
+
+### 5mC in fractions
+```{r}
+plot_vio_all <- function(data_tbl, WHAT){
+  # data_tbl = data_full_f
+  # WHAT = "wmean_me_bin"
+  WHAT = names(data_tbl)[grepl(WHAT, names(data_tbl))]
+  data_tbl %>% 
+    distinct(bin, .keep_all = T) %>% 
+    mutate(fraction = factor(fraction, level = c(1,0), labels = c("accessible", "inaccessible"))) %>% 
+    ggplot(aes("all", get(WHAT))) +
+    geom_violin(fill = "grey50", color = "black") +
+    geom_boxplot(fill = "white", color = "black", width = 0.2, alpha = 0.8, outlier.alpha = 0, coef = 0) +
+    scale_y_continuous(limits = c(0,1), labels = label_number(scale = 1*100)) +
+    theme_EK() +
+    labs(y = WHAT, 
+         caption = paste("n =", nrow(distinct(data_tbl, bin, .keep_all = T))))
+}
+
+plot_vio_fract <- function(data_tbl, WHAT){
+  # data_tbl = data_full_f
+  # WHAT = "wmean_me_fraction"
+  WHAT = names(data_tbl)[grepl(WHAT, names(data_tbl))]
+  data_tbl %>% 
+    mutate(fraction = factor(fraction, level = c(1,0), labels = c("accessible", "inaccessible"))) %>% 
+    ggplot(aes(fraction, get(WHAT))) +
+    geom_violin(fill = "grey50", color = "black") +
+    geom_boxplot(fill = "white", color = "black", width = 0.2, alpha = 0.8, outlier.alpha = 0, coef = 0) +
+    scale_y_continuous(limits = c(0,1), labels = label_number(scale = 1*100)) +
+    theme_EK() +
+    labs(y = WHAT, 
+         caption = paste("n =", nrow(distinct(data_tbl, bin, .keep_all = T))))
+}
+```
+
+#### CA distributions per fraction
+```{r}
+p1 <- plot_vio_all(data_full_f, "wmean_acc_bin$")
+# p1
+
+p2 <- plot_vio_fract(data_full_f, "wmean_acc_fraction$")
+# p2
+
+pt <- p1 + p2 + plot_layout(widths = c(0.55, 1))
+pt
+ggsave(pt, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_Acc_fractions_v", DATE, ".pdf"), width = 4, height = 4)
+```
+#### CA distributions per fraction - enhancer
+```{r}
+p1 <- plot_vio_all(filter(data_full_f, chromHMMcl == "C5_CREs_enhancer"), "wmean_acc_bin$")
+# p1
+
+p2 <- plot_vio_fract(filter(data_full_f, chromHMMcl == "C5_CREs_enhancer"), "wmean_acc_fraction$")
+# p2
+
+pt <- p1 + p2 + plot_layout(widths = c(0.55, 1))
+pt
+ggsave(pt, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_Acc_fractions_enhancer_v", DATE, ".pdf"), width = 4, height = 4)
+```
+
+\
+
+#### 5mC distributions per fraction
+```{r}
+p1 <- plot_vio_all(data_full_f, "wmean_me_bin$")
+# p1
+
+p2 <- plot_vio_fract(data_full_f, "wmean_me_fraction$")
+# p2
+
+pt <- p1 + p2 + plot_layout(widths = c(0.55, 1))
+pt
+ggsave(pt, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_5mC_fractions_v", DATE, ".pdf"), width = 4, height = 4)
+```
+#### 5mC distributions per fraction - enhancer
+```{r}
+p1 <- plot_vio_all(filter(data_full_f, chromHMMcl == "C5_CREs_enhancer"), "wmean_me_bin$")
+# p1
+
+p2 <- plot_vio_fract(filter(data_full_f, chromHMMcl == "C5_CREs_enhancer"), "wmean_me_fraction$")
+# p2
+
+pt <- p1 + p2 + plot_layout(widths = c(0.55, 1))
+pt
+ggsave(pt, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_5mC_fractions_enhancer_v", DATE, ".pdf"), width = 4, height = 4)
+```
+
+\
+
+### Delta 5mC distributions
+```{r}
+p_histo <- data_full_f %>% 
+  distinct(bin, .keep_all = T) %>% 
+  ggplot(aes(wmean_me_fraction_delta)) +
+  stat_bin(aes(y=..count../sum(..count..)), color = "black", fill = "grey70", binwidth = 0.05) +
+  scale_x_continuous(breaks = seq(-1,1,0.5), expand = expansion(add = 0)) +
+  scale_y_continuous(limits = c(0,0.3), breaks = c(0, 0.15, 0.3), expand = expansion(add = 0)) +
+  theme_EK() +
+  theme(panel.border = element_blank(),
+        axis.line = element_line(color = "black")) +
+  labs(x = "delta 5mC",
+       y = "Fraction CpGs",
+       caption = paste("n =", nrow(distinct(data, bin, .keep_all = T))))
+
+p_histo
+ggsave(p_histo, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_histo_plot_d5mC_v", DATE, ".pdf"), width = 4, height = 2)
+```
+
+\
+
+\
+
+## #2 Analysis - Check - CMH test
+Coverage cutoff for ES WT is currently >= 30 reads.  
+
+\
+
+### Coverage of all states
+```{r}
+var <- paste0(SAMPLE_OI_full, "_mean_cov_bin")
+
+p_u <- data_states %>% 
+  ggplot(aes(state, get(var), fill = state)) +
+  geom_violin() +
+  geom_boxplot(fill = "white",  width = .1, alpha = 0.8, outlier.shape = NA, coef = 0) +
+  scale_y_log10() +
+  scale_fill_manual(values = COLORS_STATE_v3) +
+  theme_EK() +
+  labs(y = var,
+       subtitle = "Final data")
+
+p_u
+
+data %>% group_by(state) %>% summarize(min_cov = min(get(var)), 
+                                       median_cov = median(get(var)), 
+                                       max_cov = max(get(var)))
+```
+
+Median coverage is similar between the states.  
+
+\
+
+### Coverage of states2
+```{r}
+var <- paste0(SAMPLE_OI_full, "_mean_cov_bin")
+
+p_u <- data %>% 
+  ggplot(aes(state2, get(var), fill = state2)) +
+  geom_violin() +
+  geom_boxplot(fill = "white",  width = .1, alpha = 0.8, outlier.shape = NA, coef = 0) +
+  scale_y_log10() +
+  scale_fill_manual(values = COLORS_STATE_v3s) +
+  theme_EK() +
+  labs(y = var,
+       subtitle = "Final data")
+
+p_u
+
+p_u2 <- data %>% 
+  ggplot(aes(log10(get(var)), fill = state2)) +
+  geom_histogram(binwidth = 0.1) +
+  scale_fill_manual(values = COLORS_STATE_v3s) +
+  facet_wrap(~state2, scales = "free_y")+
+  theme_EK() +
+  labs(x = paste("log10", var))
+p_u2
+
+data %>% group_by(state2) %>% summarize(min_cov = min(get(var)), 
+                                       median_cov = median(get(var)), 
+                                       max_cov = max(get(var)))
+
+```
+
+Same applies here when we look at the 4 states.  
+
+\
+
+### Mean 5mC of states
+```{r fig.height=4, fig.width=10}
+var <- paste0(SAMPLE_OI_full, "_wmean_me_bin")
+
+p_u <- data %>% 
+  ggplot(aes(state, get(var), fill = state)) +
+  geom_violin() +
+  geom_boxplot(fill = "white",  width = .1, alpha = 0.8, outlier.shape = NA, coef = 0) +
+  scale_fill_manual(values = COLORS_STATE_v3s[c(-2)]) +
+  theme_EK() +
+  labs(y = var,
+       subtitle = "Final data")
+
+p_u2 <- data %>% 
+  ggplot(aes(state2, get(var), fill = state2)) +
+  geom_violin() +
+  geom_boxplot(fill = "white",  width = .1, alpha = 0.8, outlier.shape = NA, coef = 0) +
+  scale_fill_manual(values = COLORS_STATE_v3s) +
+  theme_EK() +
+  labs(y = var,
+       subtitle = "Final data")
+p_u + p_u2 
+  
+data %>% group_by(state) %>% summarize(min_cov = min(get(var)), 
+                                       median_cov = median(get(var)), 
+                                       max_cov = max(get(var)))
+```
+
+\
+
+### Numbers CMH test
+```{r}
+data %>% 
+  distinct(bin, .keep_all = T) %>% 
+  count(state0) %>% 
+  mutate(sum = sum(n),
+         percentage = round((n/sum*100),2))
+
+data %>% 
+  distinct(bin, .keep_all = T) %>% 
+  count(state) %>% 
+  mutate(sum = sum(n),
+         percentage = round((n/sum*100),2))
+
+data %>% 
+  distinct(bin, .keep_all = T) %>% 
+  count(state2) %>% 
+  mutate(sum = sum(n),
+         percentage = round((n/sum*100),2))
+```
+
+\
+
+### Numbers on states - COR & pval
+```{r}
+data %>% 
+  group_by(state2) %>% 
+  summarize(min_COR = min(COR),
+            max_COR = max(COR),
+            median_COR = max(COR),
+            min_pval = min(pval),
+            max_pval = max(pval),
+            median_pval = max(pval)
+            )
+```
+
+Cutoff were successfully applied.  
+
+\
+
+### Relationship coverage vs COR
+```{r}
+var <- paste0(SAMPLE_OI_full, "_mean_cov_bin")
+
+p_u <- data %>% 
+  ggplot(aes(log2(COR), log10(get(var)), color = state2)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = COLORS_STATE_v3s) +
+  facet_wrap(~state2)+
+  theme_EK() +
+  labs(y = "log10(coverage)")
+p_u
+```
+
+From here it becomes clear that those neutral sites that have a low COR close to 0.5 (high log2(COR) close to 0.69) don't meet the pvalue threshold because of the low coverage.  
+
+\
+
+### Relationship coverage vs pvalue
+```{r}
+var <- paste0(SAMPLE_OI_full, "_mean_cov_bin")
+
+p_u <- data %>% 
+  ggplot(aes(-log10(pval), log10(get(var)), color = state2)) +
+  geom_point(alpha = 0.5) +
+  xlim(0,250) +
+  scale_color_manual(values = COLORS_STATE_v3s) +
+  facet_wrap(~state2) +
+  theme_EK() +
+  labs(y = "log10(coverage)")
+p_u
+```
+
+Also here it becomes apparent that low coverage leads to high pvalues (low -log10(pval)). This is why we set a 30x coverage cutoff to not inflate the number of neutral sites.    
+
+\
+
+\
+
+## #3 Analysis - Chacterization antagonist vs neutral
+### COR Histogram
+```{r}
+p_his <- data %>% 
+  ggplot(aes(log2(COR))) +
+  geom_histogram(aes(y=..count../sum(..count..)), binwidth = 0.2, color = "black") +
+  scale_y_continuous(labels=scales::percent) +
+  xlim(-4, 4) +
+  theme_EK() +
+  labs(y = "frequency", 
+       caption = paste("n =", nrow(data)))
+p_his
+
+# ggsave(plot = p_his, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_COR_histogram_plot_v", DATE, ".pdf"))
+```
+
+\
+
+### Volcano plot
+```{r}
+ggplot.volcano <- function(plot_tbl, COLORS_STATE, STATE) {
+  # plot_tbl = data
+  TEXTSIZE = 4
+  XLIM.N = 6
+  POINT_SIZE = 1.8
+  POINT_ALPHA = 0.8
+  
+  counts <- plot_tbl %>% 
+    count(get(STATE)) %>% 
+    mutate(countlabel = paste0(`get(STATE)`, " (", n, ")")) %>% 
+    arrange(countlabel) %>% 
+    pull(countlabel)
+  counts        <- c(counts[grepl("neu", counts)], counts[grepl("^an", counts)], counts[grepl("^ag", counts)],counts[grepl("ICR", counts)])
+  n_antagonist  <- plot_tbl %>% filter(get(STATE) == "antagonist") %>% pull(bin) %>% unique() %>% length()
+  p_antagonist  <- round((n_antagonist/nrow(plot_tbl))*100, 2)
+  n_agonist     <- plot_tbl %>% filter(get(STATE) == "agonist") %>% pull(bin) %>% unique() %>% length()
+  p_agonist     <- round((n_agonist/nrow(plot_tbl))*100, 2)
+
+  plot_tbl %>% 
+    ggplot() +
+    xlim(-XLIM.N, XLIM.N) +
+    geom_point(data = plot_tbl %>% filter(grepl("neutral", get(STATE))), aes(log2(COR), -log10(pval), color = get(STATE)), 
+               alpha = 0.8, size = POINT_SIZE) +
+    geom_point(data = plot_tbl %>% filter(grepl("^agonist", get(STATE))), aes(log2(COR), -log10(pval), color = get(STATE)), 
+               alpha = POINT_ALPHA, size = POINT_SIZE) +
+    geom_point(data = plot_tbl %>% filter(grepl("antagonist", get(STATE))), aes(log2(COR), -log10(pval), color = get(STATE)), 
+               alpha = POINT_ALPHA, size = POINT_SIZE) +
+    geom_point(data = plot_tbl %>% filter(grepl("ICR", get(STATE))), aes(log2(COR), -log10(pval), color = get(STATE)), 
+               alpha = POINT_ALPHA, size = POINT_SIZE) +
+    scale_color_manual(values = COLORS_STATE, labels = counts) +
+    theme_EK() +
+    labs(color = STATE, 
+         subtitle = paste0("n = ", nrow(plot_tbl), " | antagonist rate = ", p_antagonist, "%", " | agonist rate = ", p_agonist, "%"))
+}
+
+```
+
+##### Antagonist pooled
+```{r}
+STATE <- "state0"
+p_vol <- ggplot.volcano(data, COLORS_STATE_v3s[c(1,3,5)], STATE) +
+    coord_fixed(ratio = 0.065) +
+    ylim(0, 160)
+p_vol
+
+p_volpdf <- p_vol
+p_volpdf$layers[[1]] <- NULL
+p_volpdf$layers[[2]] <- NULL
+p_volpdf
+
+ggsave(plot = p_vol, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_volcano_plot_v", DATE, ".png"))
+ggsave(plot = p_volpdf, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_volcano_plot_v", DATE, ".pdf"))
+```
+
+##### States separated
+```{r}
+STATE <- "state"
+p_vol2 <- ggplot.volcano(data, COLORS_STATE_v3s[c(1,3,4,5)], STATE) +
+    coord_fixed(ratio = 0.065) +
+    ylim(0, 160) +
+    facet_wrap(~get(STATE), nrow = 1) 
+p_vol2
+
+ggsave(plot = p_vol2, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_volcano_plot_separated_v", DATE, ".png"), width = 10, height = 6)
+ggsave(plot = p_vol2, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_volcano_plot_separated_v", DATE, ".pdf"), width = 10, height = 6)
+```
+
+\
+
+### chromHMM anno - w/ agonist
+**As stacked barplot**
+```{r}
+COLORS_ANNO <- c(
+  RColorBrewer::brewer.pal(5, name = "OrRd")[3],
+  RColorBrewer::brewer.pal(5, name = "PuRd")[3],
+  RColorBrewer::brewer.pal(5, name = "Greens")[3],
+  RColorBrewer::brewer.pal(5, name = "Greys")[3],
+  RColorBrewer::brewer.pal(3, name = "Blues")[3]
+) %>% rev()
+names(COLORS_ANNO) <- (pull(data, chromHMMcl) %>% unique() %>% sort())
+
+p_ano1 <- data %>% 
+  ggplot(aes(state2, fill = chromHMMcl)) +
+  geom_bar(position="fill", stat="count") +
+  scale_fill_manual(values = COLORS_ANNO) +
+  scale_y_continuous(labels = label_number(scale = 1*100)) +
+  theme_EK() +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "count [%]")
+p_ano1
+
+p_ano2 <- data %>% 
+  filter(state2 != "ICR") %>% 
+  filter(state2 != "neutral") %>% 
+  ggplot(aes(state2, fill = chromHMMcl)) +
+  geom_bar(position="fill", stat="count") +
+  scale_fill_manual(values = COLORS_ANNO) +
+  scale_y_continuous(labels = label_number(scale = 1*100), breaks = seq(0,1,0.5)) +
+  theme_EK() +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "count [%]")
+p_ano2
+
+
+# ggsave(plot = p_ano1, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_chromHMMcl_v", DATE, ".pdf"), width = 5, height = 3)
+# ggsave(plot = p_ano2, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_chromHMMcl_states_v", DATE, "_stacked_v2.pdf"), width = 4, height = 3)
+```
+
+```{r}
+COLORS_ANNO_2 <- c(
+  RColorBrewer::brewer.pal(3, name = "OrRd"),
+  RColorBrewer::brewer.pal(3, name = "PuRd")[2],
+  RColorBrewer::brewer.pal(3, name = "Greens")[-1],
+  RColorBrewer::brewer.pal(5, name = "Greys")[-1],
+  RColorBrewer::brewer.pal(3, name = "Blues")[2]
+)
+
+p_ano2 <- data %>% 
+  filter(state2 != "ICR") %>% 
+  filter(state2 != "neutral") %>% 
+  ggplot(aes(state2, fill = chromHMM)) +
+  geom_bar(position="fill", stat="count") +
+  scale_fill_manual(values = COLORS_ANNO_2) +
+  scale_y_continuous(labels = label_number(scale = 1*100), breaks = seq(0,1,0.5)) +
+  theme_EK() +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "count [%]")
+p_ano2
+
+# ggsave(plot = p_ano2, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_chromHMM_states_v", DATE, "_stacked_v2.pdf"), width = 5, height = 4)
+```
+
+\
+
+
+### chromHMM anno - w/o agonist
+```{r}
+COLORS_ANNO <- c(
+  RColorBrewer::brewer.pal(5, name = "OrRd")[3],
+  RColorBrewer::brewer.pal(5, name = "PuRd")[3],
+  RColorBrewer::brewer.pal(5, name = "Greens")[3],
+  RColorBrewer::brewer.pal(5, name = "Greys")[3],
+  RColorBrewer::brewer.pal(3, name = "Blues")[3]
+) %>% rev()
+names(COLORS_ANNO) <- (pull(data, chromHMMcl) %>% unique() %>% sort())
+
+p_ano2 <- data %>% 
+  filter(state2 != "ICR") %>% 
+  filter(state2 != "neutral") %>% 
+  filter(state2 != "agonist") %>% 
+  ggplot(aes(state2, fill = chromHMMcl)) +
+  geom_bar(position="fill", stat="count") +
+  scale_fill_manual(values = COLORS_ANNO) +
+  scale_y_continuous(labels = label_number(scale = 1*100), breaks = seq(0,1,0.5)) +
+  theme_EK() +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "count [%]")
+p_ano2
+
+
+ggsave(plot = p_ano1, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_chromHMMcl_v", DATE, ".pdf"), width = 5, height = 3)
+ggsave(plot = p_ano2, filename = paste0(WD, OUTDIR, SAMPLE_OI, "_chromHMMcl_states_v", DATE, "_stacked.pdf"), width = 4, height = 3)
+```
+
+\
+
+### CpG density
+Identify and count all CpGs within 400bp windows surrounding the center CpG to calculate the CpG density.
+```{r}
+bin_size <- 400
+input_data <- resize(data_states_gr, width = bin_size, fix = "center")
+seq_bins <- getSeq(Mmusculus, input_data)
+CpG_count <- vcountPattern("CG", seq_bins)
+CpG_density <- CpG_count/((bin_size)/100)
+
+CpG_data <- cbind(bin = input_data$bin, CpG_count, CpG_density)
+colnames(CpG_data) <- c("bin", paste0("CpG_count_",bin_size, "bp"), paste0("CpG_density_",bin_size, "bp"))
+CpG_data <- CpG_data %>% 
+  as_tibble() %>% 
+  mutate(across(contains("CpG"), ~ as.numeric(.x)))
+```
+
+```{r}
+data2   <- left_join(data, CpG_data)
+data_f2 <- left_join(data_f, CpG_data)
+```
+
+```{r}
+plot_his <- function(tbl, var, STATE, STATEFILTER = "", STATEFILTER2 = "", COLORi) {
+  tbl %>% 
+    filter(state2 != STATEFILTER) %>% 
+    filter(state2 != STATEFILTER2) %>% 
+    ggplot(aes(get(var), fill = get(STATE))) +
+    geom_histogram(binwidth = 1, color = "grey20") +
+    scale_fill_manual(values = COLORi) +
+    scale_y_continuous(expand = expansion(mult = c(0, .2))) + 
+    facet_wrap(~get(STATE), scales = "free_y", ncol = 1, strip.position = "right", ) +
+    labs(x = "Number of CGs per 100bp", 
+         fill = STATE) +
+    theme_EK() +
+    theme(strip.background = element_rect(fill = "white", color = "black", size = 1))
+}
+
+plot_vio <- function(tbl, var, STATE, STATEFILTER = "", STATEFILTER2 = "", COLORi) {
+  tbl %>%
+    filter(state2 != STATEFILTER) %>% 
+    filter(state2 != STATEFILTER2) %>% 
+    ggplot(aes(get(STATE), get(var), fill = get(STATE))) +
+    geom_violin(color = "grey20") +
+    geom_boxplot(fill = "white", color = "black", width = 0.2, alpha = 0.8, outlier.alpha = 0, coef = 0) +
+    scale_fill_manual(values = COLORi) +
+    labs(y = "Number of CGs per 100bp", 
+         x = STATE,
+         fill = STATE) +
+    theme_EK()
+}
+```
+
+```{r fig.height=4, fig.width=10}
+var <- "CpG_density_400bp"
+CG2 <- plot_his(data2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) +
+  plot_layout(widths = c(0.7, 0.3), guides = "collect") + 
+  plot_annotation(title = var)
+
+CG2f <- plot_his(data_f2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) +
+  plot_layout(widths = c(0.7, 0.3), guides = "collect") + 
+  plot_annotation(title = paste(var, "_filtered"))
+
+CG4 <- plot_vio(data2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) + 
+  plot_annotation(title = var)
+
+CG4f <- plot_vio(data_f2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) + 
+  plot_annotation(title = paste(var, "_filtered"))
+
+CG2 + CG4 + plot_annotation(title = var)
+CG2f + CG4f + plot_annotation(title = paste(var, "_filtered"))
+
+```
+
+\
+
+**Final plot**
+```{r}
+var <- "CpG_density_400bp"
+
+data2 %>% 
+  count(state2) %>% 
+  mutate(sum = sum(n))
+
+CG5 <- plot_vio(data2, var, STATE = "state2", STATEFILTER = "neutral", STATEFILTER2 = "agonist", COLORi = COLORS_STATE_v3s[-c(1,5)]) + 
+          plot_annotation(title = paste(var)) +
+          stat_compare_means(label = "p.signif", size = 3, ref.group = "neutral+") +
+          stat_compare_means(ref.group = "neutral+", label.y = -Inf) 
+CG5
+# ggsave(plot = CG5, filename = paste0(WD, OUTDIR, paste(SAMPLE_OI, var, "neutral+", sep="_"), "_v", DATE, ".pdf"), width = 4, height = 3.5)
+
+CG6 <- plot_vio(data_f2, var, STATE = "state2", STATEFILTER = "neutral", STATEFILTER2 = "agonist", COLORi = COLORS_STATE_v3s[-c(1,5)]) + 
+          plot_annotation(title = paste(var, "filtered")) +
+          stat_compare_means(label = "p.signif", size = 3, ref.group = "neutral+") +
+          stat_compare_means(ref.group = "neutral+", label.y = -Inf) 
+CG6
+ggsave(plot = CG6, filename = paste0(WD, OUTDIR, paste(SAMPLE_OI, var, "neutral+", "filtered", sep="_"), "_v", DATE, ".pdf"), width = 4, height = 3.5)
+```
+
+All sites have low CpG densities. This is not a differentiating criterium between neutral and antagonist sites.  
+
+\
+
+### Accessibility 
+```{r}
+var <- paste0(SAMPLE_OI_full, "_wmean_acc_bin")
+AC1 <- plot_vio(data2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) +
+  ylim(0,1) +
+  labs(y = "accessibility (%)",
+       subtitle = "all")
+AC1
+
+AC1f <- plot_vio(data_f2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) +
+  ylim(0,1) +
+  labs(y = "accessibility (%)",
+       subtitle = "filtered")
+AC1f
+```
+
+Antagonist sites are slightly higher accessible than neutral sites. But all show intermediate accessibility, thus, are active.  
+
+\
+
+**Final plot**
+```{r}
+var <- paste0(SAMPLE_OI_full, "_wmean_acc_bin")
+
+AC2 <- plot_vio(data2, var, STATE = "state2", STATEFILTER = "neutral", STATEFILTER2 = "agonist", COLORi = COLORS_STATE_v3s[-c(1,5)]) +
+          stat_compare_means(label = "p.signif", size = 3, ref.group = "neutral+") +
+          stat_compare_means(ref.group = "neutral+", label.y = -Inf) +
+          scale_y_continuous(name = "accessibility (%)", limits = c(0,1), labels = label_number(scale = 1*100)) +
+          labs(subtitle = paste(var))
+AC2
+# ggsave(plot = AC2, filename = paste0(WD, OUTDIR, paste(SAMPLE_OI, var, "neutral+", sep="_"), "_v", DATE, ".pdf"), width = 4, height = 3.5)
+
+AC3 <- plot_vio(data_f2, var, STATE = "state2", STATEFILTER = "neutral", STATEFILTER2 = "agonist", COLORi = COLORS_STATE_v3s[-c(1,5)]) +
+          stat_compare_means(label = "p.signif", size = 3, ref.group = "neutral+") +
+          stat_compare_means(ref.group = "neutral+", label.y = -Inf) +
+          scale_y_continuous(name = "accessibility (%)", limits = c(0,1), labels = label_number(scale = 1*100)) +  
+          labs(subtitle = paste(var, "filtered"))
+AC3
+ggsave(plot = AC3, filename = paste0(WD, OUTDIR, paste(SAMPLE_OI, var, "neutral+", "filtered", sep="_"), "_v", DATE, ".pdf"), width = 4, height = 3.5)
+```
+
+\
+
+### Average 5mC
+```{r}
+var <- paste0(SAMPLE_OI_full, "_wmean_me_bin")
+
+ME1 <- plot_vio(data2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) +
+  stat_compare_means(ref.group = "neutral+", label = "p.signif") +
+  scale_y_continuous(name = "5mC (%)", limits = c(0,1), labels = label_number(scale = 1*100)) +
+  labs(subtitle = "all")
+ME1
+
+ME1f <- plot_vio(data_f2, var, STATE = "state2", COLORi = COLORS_STATE_v3s) +
+  stat_compare_means(ref.group = "neutral+", label = "p.signif") +
+  scale_y_continuous(name = "5mC (%)", limits = c(0,1), labels = label_number(scale = 1*100)) +
+  labs(y = "accessibility (%)",
+       subtitle = "filtered")
+ME1f
+```
+
+\
+
+**Final plot**
+```{r}
+var <- paste0(SAMPLE_OI_full, "_wmean_me_bin")
+
+ME2 <- plot_vio(data2, var, STATE = "state2", STATEFILTER = "neutral", COLORi = COLORS_STATE_v3s[c(-1)]) +
+          stat_compare_means(label = "p.signif", size = 3, ref.group = "neutral+") +
+          stat_compare_means(ref.group = "neutral+", label.y = -Inf) +
+          scale_y_continuous(name = "5mC (%)", limits = c(0,1), labels = label_number(scale = 1*100)) +
+          labs(subtitle = paste(var))
+ME2
+# ggsave(plot = ME2, filename = paste0(WD, OUTDIR, paste(SAMPLE_OI, var, "neutral+", sep="_"), "_v", DATE, ".pdf"), width = 4, height = 3.5)
+
+ME2f <- plot_vio(data_f2, var, STATE = "state2", STATEFILTER = "neutral", COLORi = COLORS_STATE_v3s[c(-1)]) +
+          stat_compare_means(label = "p.signif", size = 3, ref.group = "neutral+") +
+          stat_compare_means(ref.group = "neutral+", label.y = -Inf) +
+          scale_y_continuous(name = "5mC (%)", limits = c(0,1), labels = label_number(scale = 1*100)) +  
+          labs(subtitle = paste(var, "filtered"))
+ME2f
+ggsave(plot = ME2f, filename = paste0(WD, OUTDIR, paste(SAMPLE_OI, var, "neutral+", "filtered", sep="_"), "_v", DATE, ".pdf"), width = 4, height = 3.5)
+```
+
+\

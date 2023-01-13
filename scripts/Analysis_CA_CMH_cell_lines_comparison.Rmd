@@ -1,0 +1,945 @@
+---
+title: "Chromatin accessibility vs 5mC analysis - Somatic Cell Lines"
+author: "Elisa Kreibich"
+date: "24/03/2022"
+
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+  # html_document:
+  #   toc: true
+  #   toc_float: true
+  #   code_folding: hide
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+Analysis of SMF data from different WT cell lines (ES, NP, MEL, C2C12) to compare antagonist and neutral sites between the different cell lineages and define cell type specific antagonist sites.    
+
+### Input
+**Files needed to run this script and which scripts to run to create those:**
+
+| Input file name | Information | Script to create |
+|:----------------|:------------|:-----------------|
+| Final_data_tibble_CA_***DATE*** _SMF_MM_***SAMPLENAME1***_***REPLICATES*** _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF*** _states.rds | Final tibble with states and all 5mC rates for cell line 1 | Make_Final_CG_CMH_data_tibbles_cell_line.Rmd |  
+| Final_data_tibble_CA_***DATE*** _SMF_MM_***SAMPLENAME2***_***REPLICATES*** _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF*** _states.rds | Final tibble with states and all 5mC rates for cell line 2 | Make_Final_CG_CMH_data_tibbles_cell_line.Rmd |  
+| Final_data_tibble_CA_***DATE*** _SMF_MM_***SAMPLENAME3***_***REPLICATES*** _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF*** _states.rds | Final tibble with states and all 5mC rates for cell line 3 | Make_Final_CG_CMH_data_tibbles_cell_line.Rmd |  
+| Final_data_tibble_CA_***DATE*** _SMF_MM_***SAMPLENAME4***_***REPLICATES*** _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF*** _states.rds | Final tibble with states and all 5mC rates for cell line 4 | Make_Final_CG_CMH_data_tibbles_cell_line.Rmd | 
+
+Example file names:
+Final_data_tibble_CA_2023-01-01_SMF_MM_ES_NO_R1_R2_R5a6_cObin10_cOCMH30_states.rds 
+Final_data_tibble_CA_2023-01-01_SMF_MM_MEL_NO_R1_R2_cObin10_cOCMH30_states.rds 
+
+\
+
+### Output
+Plots and bed files of the following analyses:  
+
+* Comparison of behaviour of sites in 2 cell lines --> How do ES antagonist/ neutral sites behave in NPs
+* Heatmap of COR comparing and clustering antagonist sites of all cell lines
+* Create bed files of cell-type specific antagonist sites
+* Run GREAT analysis (Genomic Regions Enrichment of Annotations Tool)
+
+\
+
+### State definitions
+**States are defined as followed:**  
+
+* **state** 
+    * antagonist: COR <= 0.5 | pvalue < 0.05 | ICR == FALSE 
+    * neutral: COR > 0.5 | no pvalue cutoff | ICR == FALSE 
+    * agonist: COR >= 2 | pvalue < 0.05 | ICR == FALSE
+    * ICR: ICR == TRUE
+
+* **state2**
+    * antagonist: COR <= 0.5 | pvalue < 0.05 | ICR == FALSE  
+    * neutral+: COR > 0.9 & < 1.1 | no pvalue cutoff | ICR == FALSE 
+    * neutral: COR > 0.5 | no pvalue cutoff | ICR == FALSE 
+    * agonist: COR >= 2 | pvalue < 0.05 | ICR == FALSE
+    * ICR: ICR == TRUE
+
+* **state0**
+    * antagonist: COR <= 0.5 | pvalue < 0.05
+    * neutral: COR > 0.5 | no pvalue cutoff  
+    * agonist: COR >= 2 | pvalue < 0.05
+
+\
+
+### Additional information on this version:  
+
+* 101 bp collection window around CpG  
+* 10x coverage cutoff per bin for NWCGW and DGCHN methylation  
+* 30x coverage cutoff for SM analysis  
+* bins most be covered by at least 2 replicates  
+* average methylation (\*\_wmean_me\_\*) == weighted mean (wmean) of all replicates  
+* average accessibility (\*\_wmean_acc\_\*) == mean of GpC methylation in bin + weighted mean (wmean) of all replicates  
+
+\
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r load libraries, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(patchwork))
+suppressPackageStartupMessages(library(ComplexHeatmap))
+suppressPackageStartupMessages(library(plyranges))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(circlize))
+suppressPackageStartupMessages(library(rGREAT))
+
+source(paste0(WD, 'scripts/utilities/COLORS.R'))
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_CA.R'))
+```
+
+### Set arguments
+```{r arguments}
+INDIR_rds   <- 'data/'
+INDIR       <- 'data_results/'
+OUTDIR_rds  <- 'data_results/'
+OUTDIR      <- 'data_results/plots/'
+dir.create(paste0(WD, OUTDIR))
+
+DATE        <- Sys.Date()
+
+#Arguments for input data sets
+SAMPLES_OI    <- c("ES", "NP", "MEL", "C2C12")   #short names of samples of interest
+INPUT_DATES   <- c("2022-10-21", "2022-10-27", "2022-10-27", "2022-10-27")  #Dates of Final tibble creations
+
+WINDOW_BED    <- WDW_SIZE              #Window size of sites for final bed files
+```
+
+### Load data
+#### Final data tibbles cell lines
+```{r}
+files         <- list.files(path = paste0(WD, INDIR),
+                    pattern = paste0("^Final_data_tibble_CA_.{1,}_states.rds"),
+                    full.names = TRUE)
+files         <- files[grepl(paste(SAMPLES_OI, collapse = "|"), files)]
+files         <- files[grepl(paste(INPUT_DATES, collapse = "|"), files)]
+SAMPLES       <- str_extract(files, "(?<=SMF_MM_)\\w{1,}_(NO|DE)")
+data_l        <- lapply(files, readRDS)
+names(data_l) <- SAMPLES
+```
+
+
+## #1 -  ES vs NP
+Compare ES antagonist sites in ES cells and NPs.  
+AIM: What happens to ES antagonist sites in NPs?  
+
+```{r}
+CL1l  <- SAMPLES[1]    #Define "reference" cell line whose state definitions you want to use
+CL2l  <- SAMPLES[4]   #Define cell line for comparison
+CL1   <- str_extract(CL1l, "^\\w{1,}(?=_)")
+CL2   <- str_extract(CL2l, "^\\w{1,}(?=_)")
+
+data_i2 <- data_l[[grep(CL2l, names(data_l))]] %>% 
+  select(bin, contains(CL2l), contains("state")) %>% 
+  select(-contains("fraction")) %>% 
+  dplyr::rename_with(~paste(CL2, .x, sep = "_"), .cols = contains("state")) %>% 
+  distinct(bin, .keep_all = TRUE)
+  
+data <- data_l[[grep(CL1l, names(data_l))]] %>% 
+  left_join(data_i2)
+
+data %>% filter(is.na(get(paste0(CL2l,"_mean_cov_bin")))) %>% nrow()
+data %>% filter(!is.na(get(paste0(CL2l,"_mean_cov_bin")))) %>% nrow()
+
+# Filter out inactive and CTCF annotations
+data <- data %>% 
+  filter(!(chromHMMcl %in% c("C1_CTCF", "C2_Inactive")))
+
+# saveRDS(data, paste0(OUTDIR_rds, 'Data_tbl_ES_NP_', DATE, '.rds'))
+```
+
+\
+
+### Changes - Scatters {.tabset}
+```{r}
+val.OI <- names(data)[grepl("wmean_me|wmean_acc", names(data))]
+plot.scatter.final2 <- function(tbl, i, CL1, CL2, STATE, Lx, Ly, coord){
+  tbl %>% 
+    filter(state2 == STATE) %>% 
+    ggplot(aes_string(val.OI[grepl(CL1, val.OI)][i], val.OI[grepl(CL2, val.OI)][i])) +
+    geom_point(color = "black", alpha = 0.6, size = 0.8) +
+    # geom_smooth(color = "dodgerblue3", method = "loess") +
+    scale_color_manual(values = COLORS_STATE_v1s) +
+    scale_x_continuous(labels = label_number(accuracy = 1, scale = 1*100), limits = Lx) +
+    scale_y_continuous(labels = label_number(scale = 1*100), limits = Ly) +
+    coord_fixed(coord) +
+    theme_EK()
+}
+
+```
+
+#### ES anatgonist
+``` {r}
+STATE <- "antagonist"
+pacc_scatter <- plot.scatter.final2(data, i = 1, CL1, CL2, STATE, c(0,1), c(0,1), 1) #+ geom_abline(slope = 1, intercept = 0, linetype = 5, color = "grey40", size = 0.8)
+# pacc_scatter
+p5mC_scatter <- plot.scatter.final2(data, i = 2, CL1, CL2, STATE, c(0.1,0.6), c(0,1), 0.5)# + geom_abline(slope = 1, intercept = 0, linetype = 5, color = "grey40", size = 0.8)
+# p5mC_scatter
+
+p.scatters <- p5mC_scatter | pacc_scatter
+p.scatters
+
+# ggsave(plot = p.scatters, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_scatter_plots", CL1, STATE, DATE, sep = "_"), ".png"))
+# ggsave(plot = p.scatters, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_scatter_plots", CL1, STATE, DATE, sep = "_"), "pdf"))
+
+```
+
+#### ES neutral
+``` {r}
+STATE <- "neutral+"
+pacc_scatter <- plot.scatter.final2(data, i = 1, CL1, CL2, STATE, c(0,1), c(0,1), 1) + geom_abline(slope = 1, intercept = 0, linetype = 5, color = "grey40", size = 0.8)
+# pacc_scatter
+p5mC_scatter <- plot.scatter.final2(data, i = 2, CL1, CL2, STATE, c(0.1,0.6), c(0,1), 0.5) + geom_abline(slope = 1, intercept = 0, linetype = 5, color = "grey40", size = 0.8)
+# p5mC_scatter
+
+p.scatters <- p5mC_scatter | pacc_scatter
+p.scatters
+
+# ggsave(plot = p.scatters, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_scatter_plots", CL1, STATE, DATE, sep = "_"), ".png"))
+# ggsave(plot = p.scatters, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_scatter_plots", CL1, STATE, DATE, sep = "_"), ".pdf"))
+
+```
+#### {}
+
+.
+
+### Changes - boxplot {.tabset}
+```{r}
+plot.violin.final2 <- function(tbl, varOI = "wmean_me", CL1, CL2, state){
+  # varOI = "wmean_me"
+  val.OI <- names(tbl)[grepl("wmean_me|wmean_acc", names(tbl))]
+
+  plot_tbl <- tbl %>% 
+    filter(state2 == STATE) %>% 
+    select(bin, state2, contains(varOI)) %>% 
+    pivot_longer(cols = contains(varOI), names_to = "cell_line", values_to = varOI) %>% 
+    mutate(cell_line = str_extract(cell_line, "^\\w{2}"))
+  
+  plot_tbl %>% 
+    ggplot(aes_string(x = "cell_line", y = varOI, fill = "state2")) +
+    geom_violin() +
+    geom_boxplot(fill = "white", width = 0.2, alpha = 0.6, outlier.alpha = 0, coef = 0) +
+    stat_compare_means(comparisons = my_comparisons, label = "p.signif", size = 3) +
+    scale_fill_manual(values = COLORS_STATE_v3s) +
+    scale_y_continuous(labels = label_number(scale = 1*100), limits = c(0,1)) +
+    labs(y = paste(varOI, "(%)"), 
+         caption = paste0("n = ", nrow(distinct(plot_tbl, bin))))+
+    theme_EK() +
+    theme(legend.position = "none")
+}
+```
+
+#### ES anatgonist
+```{r}
+my_comparisons <- list( c("ES", "NP"))
+STATE <- "antagonist"
+data2 <- data %>% 
+  mutate(across(contains("wmean_acc"), ~ (1-.x)))
+
+p5mC_vio <- plot.violin.final2(data2, varOI = "wmean_me", CL1, CL2, STATE)
+p5mC_vio
+pacc_vio <- plot.violin.final2(data2, varOI = "wmean_acc", CL1, CL2, STATE) +
+   labs(y = paste("SMF (1-accessibility)", "(%)"))
+pacc_vio
+
+p.vios <- p5mC_vio | pacc_vio
+p.vios
+
+# ggsave(plot = p.vios, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_violin_plots", CL1, STATE, DATE, sep = "_"), ".pdf"))
+
+```
+
+#### ES neutral+
+```{r}
+my_comparisons <- list( c("ES", "NP"))
+STATE <- "neutral+"
+
+data2 <- data %>% 
+  mutate(across(contains("wmean_acc"), ~ (1-.x)))
+
+p5mC_vio <- plot.violin.final2(data2, varOI = "wmean_me", CL1, CL2, STATE)
+p5mC_vio
+pacc_vio <- plot.violin.final2(data2, varOI = "wmean_acc", CL1, CL2, STATE) +
+   labs(y = paste("SMF (1-accessibility)", "(%)"))
+pacc_vio
+
+p.vios <- p5mC_vio | pacc_vio
+p.vios
+
+# ggsave(plot = p.vios, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_violin_plots", CL1, STATE, DATE, sep = "_"), ".pdf"))
+
+```
+
+#### ES agonist
+```{r}
+my_comparisons <- list( c("ES", "NP"))
+STATE <- "agonist"
+
+data2 <- data %>% 
+  mutate(across(contains("wmean_acc"), ~ (1-.x)))
+
+p5mC_vio <- plot.violin.final2(data2, varOI = "wmean_me", CL1, CL2, STATE)
+p5mC_vio
+pacc_vio <- plot.violin.final2(data2, varOI = "wmean_acc", CL1, CL2, STATE) +
+   labs(y = paste("SMF (1-accessibility)", "(%)"))
+pacc_vio
+
+p.vios <- p5mC_vio | pacc_vio
+p.vios
+
+# ggsave(plot = p.vios, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_violin_plots", CL1, STATE, DATE, sep = "_"), ".pdf"))
+
+```
+#### ES ICRs
+```{r}
+my_comparisons <- list( c("ES", "NP"))
+STATE <- "ICR"
+
+data2 <- data %>% 
+  mutate(across(contains("wmean_acc"), ~ (1-.x)))
+
+p5mC_vio <- plot.violin.final2(data2, varOI = "wmean_me", CL1, CL2, STATE)
+p5mC_vio
+pacc_vio <- plot.violin.final2(data2, varOI = "wmean_acc", CL1, CL2, STATE) +
+   labs(y = paste("SMF (1-accessibility)", "(%)"))
+pacc_vio
+
+p.vios <- p5mC_vio | pacc_vio
+p.vios
+
+# ggsave(plot = p.vios, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "changes_violin_plots", CL1, STATE, DATE, sep = "_"), ".pdf"))
+
+```
+
+
+#### {}  
+.
+
+\
+
+### Changes - Delta
+```{r}
+plot.violin.final3 <- function(tbl, varOI = "wmean_me", CL1, CL2, state){
+  # tbl = data
+  # varOI = "wmean_me"
+  val.OI <- names(tbl)[grepl(varOI, names(tbl))]
+
+  plot_tbl <- tbl %>% 
+    filter(state2 %in% c("neutral+", "antagonist", "ICR", "agonist")) %>%
+    select(bin, state2, contains(varOI)) %>% 
+    mutate(delta = (get(val.OI[2])-get(val.OI[1])))
+  
+  numbers <- plot_tbl %>% 
+    count(state2) %>% 
+    mutate(label = paste(state2, "=", n)) %>% 
+    pull(label)
+  
+  plot_tbl %>% 
+    ggplot(aes(x = state2, y = delta, fill = state2)) +
+    geom_hline(yintercept = 0, color = "grey20", linetype = 2) +
+    geom_violin() +
+    geom_boxplot(fill = "white", width = 0.2, alpha = 0.6, outlier.alpha = 0, coef = 0) +
+    stat_compare_means(ref.group = "neutral+", label = "p.signif", size = 3) +
+    scale_fill_manual(values = COLORS_STATE_v3s) +
+    scale_y_continuous(labels = label_number(scale = 1*100)) +
+    labs(y = paste("delta", varOI, "(%)"), 
+         caption = paste(numbers, collapse = " | ")) +
+    theme_EK() +
+    theme(legend.position = "none")
+}
+```
+
+```{r}
+my_comparisons <- list( c("ES", "NP"))
+data2 <- data %>% 
+  mutate(across(contains("wmean_acc"), ~ (1-.x)))
+
+p5mC_vio <- plot.violin.final3(data2, varOI = "wmean_me", CL1, CL2, STATE) +
+  ylim(-0.50,0.85)
+p5mC_vio
+pacc_vio <- plot.violin.final3(data2, varOI = "wmean_acc", CL1, CL2, STATE) +
+  ylim(-0.30,0.45) +
+  labs(y = paste("delta SMF (1-accessibility)", "(%)"))
+pacc_vio
+
+p.vios <- p5mC_vio | pacc_vio
+p.vios
+
+# ggsave(plot = p.vios, filename = paste0(WD, OUTDIR, paste(CL1, CL2, "delta_changes_violin_plots", CL1, DATE, sep = "_"), ".pdf"))
+
+```
+\
+
+### Changes delta delta 5mC vs CA
+```{r}
+data2 <- data %>% 
+  mutate(across(contains("wmean_acc"), ~ (1-.x)))
+
+  tbl = data2
+  varOI = c("wmean_me", "wmean_acc")
+  val.OI1 <- names(tbl)[grepl(paste(varOI[1], collapse = "|"), names(tbl))]
+  val.OI2 <- names(tbl)[grepl(paste(varOI[2], collapse = "|"), names(tbl))]
+
+  plot_tbl <- tbl %>% 
+    filter(state2 %in% c("neutral+", "antagonist", "ICR", "agonist")) %>%
+    select(bin, state2, chromHMMcl, contains(varOI)) %>% 
+    mutate(delta_5mC = (get(val.OI1[2])-get(val.OI1[1]))) %>% 
+    mutate(delta_acc = (get(val.OI2[2])-get(val.OI2[1])))
+  
+```
+
+**Correlation score**
+```{r}
+cor_val <- plot_tbl %>% 
+  select(bin, state2, delta_acc, delta_5mC) %>% 
+  distinct(bin, .keep_all = T) %>% 
+  pivot_wider(names_from = "state2", values_from = c("delta_acc", "delta_5mC"), names_sep = "_") %>% 
+  select(-bin) %>% 
+  corrr::correlate()
+cor_val
+
+n_states <- plot_tbl %>% count(state2) %>% nrow()
+cor_val_label <- paste("", str_remove_all(names(cor_val)[2], "delta_acc_"), "R =", round(cor_val[n_states+1,2],3),
+                       "\n", str_remove_all(names(cor_val)[3], "delta_acc_"), "R =", round(cor_val[n_states+2,3],3),
+                       "\n", str_remove_all(names(cor_val)[4], "delta_acc_"), "R =", round(cor_val[n_states+3,4],3),
+                       "\n", str_remove_all(names(cor_val)[5], "delta_acc_"), "R =", round(cor_val[n_states+4,5],3))
+
+```
+
+```{r}
+p1 <- plot_tbl %>% 
+    ggplot(aes(x = delta_5mC, y = delta_acc, color = state2)) +
+    geom_hline(yintercept = 0, color = "grey20", linetype = 2) +
+    geom_point() +
+    scale_color_manual(values = COLORS_STATE_v3s) +
+    scale_y_continuous(labels = label_number(scale = 1*100)) +
+    scale_x_continuous(labels = label_number(scale = 1*100)) +
+    geom_smooth(method = "lm", color = "grey20") +
+    labs(y = paste("delta SMF (1-accessibility) (", CL2, "-", CL1, ")","(%)"),
+         x = paste("delta 5mC (", CL2, "-", CL1, ")","(%)"),
+         caption = cor_val_label) +
+    theme_EK() +
+    theme(legend.position = "none") +
+    facet_grid(rows = vars(state2))
+  
+ p1
+ ggsave(plot = p1, 
+        filename = paste0(WD, OUTDIR, paste(CL1, CL2, "delta_delta_changes_scatter_plots", CL1, DATE, sep = "_"), ".pdf"),
+        width = 6, height = 9)
+ ggsave(plot = p1, 
+        filename = paste0(WD, OUTDIR, paste(CL1, CL2, "delta_delta_changes_scatter_plots", CL1, DATE, sep = "_"), ".png"),
+        width = 6, height = 9)
+  
+  
+  
+  
+    plot_tbl %>% 
+    ggplot(aes(x = delta_5mC, y = delta_acc, color = state2)) +
+    geom_hline(yintercept = 0, color = "grey20", linetype = 2) +
+    geom_point() +
+    scale_color_manual(values = COLORS_STATE_v3s) +
+    scale_y_continuous(labels = label_number(scale = 1*100)) +
+    scale_x_continuous(labels = label_number(scale = 1*100)) +
+    geom_smooth(method = "lm", color = "grey20") +
+    labs(y = paste("delta SMF (1-accessibility) (", CL2, "-", CL1, ")","(%)"),
+         x = paste("delta 5mC (", CL2, "-", CL1, ")","(%)")) +
+    theme_EK() +
+    theme(legend.position = "none") +
+    facet_grid(rows = vars(state2), cols = vars(chromHMMcl))
+```
+
+### Stack
+```{r}
+plot.stack.final <- function(tbl, CL1, CL2, STATE){
+  tbl <- data
+  
+  varOI = c("_NO_mean_cov_bin", "_state0$")
+  val.OI1 <- names(tbl)[grepl(paste0(CL2, varOI[1]), names(tbl))]
+  val.OI2 <- names(tbl)[grepl(paste0(CL2, varOI[2]), names(tbl))]
+
+  tbl2 <- tbl %>% 
+     filter(state2 == STATE) %>% 
+     filter(get(val.OI1) >= 10) %>%
+    mutate(across(contains(val.OI2),  ~ case_when(
+      get(val.OI2) == "agonist" ~ "neutral",
+      TRUE~paste(get(val.OI2))
+    )),
+    across(contains(val.OI2),  ~ factor(get(val.OI2), levels = c("neutral", "antagonist", "high_5mC", "low_5mC"))
+    )) 
+  
+  percentages <- tbl2 %>% 
+     count(get(val.OI2)) %>% 
+     mutate(sum = sum(n),
+            ratio = n/sum,
+            p = n/sum*100) %>% 
+    dplyr::rename_with(.fn = ~ paste(val.OI2), .cols = 1)
+  
+  
+  tbl2 %>% 
+    ggplot(aes(CL1, fill = get(val.OI2))) +
+    geom_bar(position="fill") +
+    geom_text(data = percentages, aes(y=ratio, label = paste0(round(p), "%")), position = position_stack(vjust = 0.5), size = 3, color = "black") +
+    scale_fill_manual(values = COLORS_STATE_v1[-c(2,4)], name = paste("fate in", CL2), labels = c("become neutral", "stay antagonist", "gain 5mC", "lose 5mC")) +
+    coord_fixed(6) +
+    theme_void()
+}
+
+CL1 = "ES"
+CL2 = "NP"
+plot_stack <- plot.stack.final(data, CL1, CL2, "antagonist")
+plot_stack
+
+ggsave(plot = plot_stack, 
+        filename = paste0(WD, OUTDIR, paste(CL1, CL2, "destination_bar_plot", DATE, sep = "_"), ".pdf"),
+        width = 4, height = 4)
+
+```
+
+
+## #2 - All cell lines 
+### Heatmap - Overlap of antagonist sites
+**Filter only for 5mC**
+```{r}
+names(data_l) <- SAMPLES
+data1 <- lapply(data_l, select, bin, state, COR, pval, contains("wmean_me")) %>%
+  lapply(dplyr::rename, wmean_me_bin = 5) %>% 
+  bind_rows(.id = "sample")
+
+bin_antagonist <- data1 %>% 
+  filter(state == "antagonist") %>% 
+  pull(bin) %>% 
+  unique()
+
+#Range of mean 5mC that is called for in the individual cells
+#Explanation: Since the antagonist sites of one cell line show increased DNA methylation levels in the other cell lines (Fig. 4A), we used an average DNA methylation cutoff of 5-85% for the Cochran-Mantel-Haenszel test. 
+AVME.i.hmp.1 <- 0.05
+AVME.i.hmp.2 <- 0.85
+
+data2 <- data1 %>% 
+  select(-state) %>% 
+  filter((dplyr::between(wmean_me_bin, AVME.i.hmp.1, AVME.i.hmp.2))) %>% 
+  select(-wmean_me_bin) %>% 
+  mutate(COR = log2(COR)) %>% 
+  pivot_wider(names_from = "sample", values_from = c("COR", "pval"), names_sep = "_") %>% 
+  na.omit() %>%
+  filter(bin %in% bin_antagonist) 
+
+nrow(data2) #final number of comparable sites
+```
+
+**Kmeans clustering of COR**
+```{r}
+COLNAMES <- str_remove(SAMPLES, "_NO")
+text_list <- c(paste(COLNAMES, "specific"), "shared")
+COLNAMES_order <- SAMPLES[c(1,4,3,2)]
+
+#Prepare input matrix for heatmap (made by ComplexHeatmap R package)
+mat <- data2 %>%
+  select(contains("COR")) %>%
+  select(contains(COLNAMES)) %>%
+  as.matrix()
+
+row.names(mat) <- pull(data2, bin)
+colnames(mat) <- str_remove(colnames(mat), "COR_")
+
+#Define k (in Kreibich et al. for 4 cell lines: k=5)
+KMEANS <- length(text_list)
+
+#Pre-create heatmap to afterwards extract numbers
+set.seed(20)
+kclus <- kmeans(mat, KMEANS, iter.max = 5)
+# kclus$cluster
+
+hmap <- draw(Heatmap(mat, name = "mat", #row_km = KMEANS, row_km_repeats = 5,
+                column_order = COLNAMES_order,
+                cluster_row_slices = FALSE, 
+                row_dend_reorder = FALSE,
+                split = factor(kclus$cluster, levels=c(1,5,2,3,4))
+                
+                # left_annotation = rowAnnotation(
+                  # foo = anno_block(gp = gpar(fill = rev(c("grey80", "grey60", "grey40", "grey20", "grey0"))),
+                           # labels = text_list,
+                           # labels_gp = gpar(col = "white", fontsize = 8)))
+                           ))
+
+#Get numbers in each cluster
+FINAL_ORDER <- c(1,3,2,5,4)
+CLUSTER_NUMBERS <- lapply(seq(KMEANS), function(x){length(row_order(hmap)[[x]])})
+# text_list2 <- lapply(seq(KMEANS), function(x){
+#   paste0(rev(text_list)[x], "\nn = ", CLUSTER_NUMBERS[x])
+# })
+# text_list2 <- rev(text_list2)
+text_list2 <- lapply(seq(KMEANS), function(x){
+  paste0(rev(text_list)[x])
+})
+text_list2 <- rev(text_list2)
+
+
+
+```
+
+```{r}
+#Define colors for heatmap
+# COLORS_HEATMAP = colorRamp2(seq(-2, 2, length = 3), c(COLORS_STATE_v3[3], "#EEEEEE", COLORS_STATE_v3[5]))
+# COLORS_HEATMAP = colorRamp2(seq(-2, 2, length = 3), c(COLORS_HEATMAP1[3], "#EEEEEE", COLORS_HEATMAP1[9]))
+COLORS_HEATMAP = colorRamp2(seq(-3, 3, length = 11), colors = brewer.pal(11,"RdBu"))
+
+#Make and save final heatmap
+ADD <- paste0("_me", AVME.i.hmp.1*100, "-", AVME.i.hmp.2*100)
+ADD2 <- paste("_v4")
+pdf(paste0(WD, OUTDIR, "CMH_somatic_COR_heatmap_", DATE, ADD, ADD2, ".pdf"), width = 7, height = 5)
+
+# set.seed(20)
+Heatmap(mat, name = "mat", #row_km = KMEANS, 
+        show_row_names = F, show_column_dend = F, show_row_dend = F,
+        column_order = COLNAMES_order,
+        cluster_row_slices = FALSE, 
+        # row_dend_reorder = FALSE,
+        split = factor(kclus$cluster, levels = FINAL_ORDER),
+        column_split = factor(colnames(mat), levels = COLNAMES_order),
+        show_column_names = F,
+        row_title = NULL,
+        column_title = NULL,
+        row_gap = unit(0.5, "mm"),
+        column_gap = unit(0.5, "mm"),
+        col = COLORS_HEATMAP, 
+        row_dend_reorder = FALSE,
+        left_annotation = rowAnnotation(
+          foo = anno_block(gp = gpar(fill = rev(c("grey80", "grey60", "grey40", "grey20", "grey0"))),
+                           labels = text_list2,
+                           labels_gp = gpar(col = "white", fontsize = 8))),
+        top_annotation = HeatmapAnnotation(
+          foo = anno_block(gp = gpar(fill = rev(c("grey60", "grey40", "grey20", "grey0"))),
+                           labels = COLNAMES_order,
+                           labels_gp = gpar(col = "white", fontface = "bold", fontsize = 10))),
+        heatmap_legend_param = list(
+          title = "log2(COR)",
+          legend_height = unit(3, "cm"))
+)
+dev.off()
+```
+
+## #3 - Cell line specific antagonist sites 
+### Making bed files
+
+* Extract antagonist sites for enhancer promoter assignment assigned using GREAT.  
+* Check for cell-type specificity --> in one other cell line the sites should be neutral or highly methylated.  
+* Filter out chromHMM CTCF and intergenic regions.  
+* Create bed files for GREAT and HOMER analysis.  
+
+```{r}
+data_l2 <- lapply(data_l, function(tbl){
+  # tbl <- data_l[[1]]
+  SAMPLE <- names(tbl)[grepl("_mean_cov_bin", names(tbl))] %>% str_remove(., "_mean_cov_bin")
+  COLNAMES <- names(tbl) %>% 
+    as_tibble() %>% 
+    mutate(names = case_when(
+      grepl("state|COR|pval", value) ~ paste(SAMPLE, value, sep = "_"),
+      TRUE~value
+    )) %>% 
+    pull(names)
+  names(tbl) <- COLNAMES
+  return(tbl)
+})
+
+data_full <- purrr::reduce(data_l2, dplyr::left_join)
+```
+
+```{r}
+# CpGs in bins
+bin_gr <- readRDS(paste0(INDIR_rds,'CGs_over_baits_', WDW_SIZE, 'bp.rds'))
+bin_gr$bin <- names(bin_gr)
+bin_gr <- resize(bin_gr, width = WINDOW_BED, fix = "center")
+bin_gr <- as_tibble(bin_gr)
+```
+
+```{r}
+make.bed.sites <- function(tbl, CL1l, CL2l, STATE){
+  # tbl <- data_full
+  var1 <- c(paste0(CL1l, "_state"),
+            paste0(CL1l, "_wmean_me_bin"))
+  
+  var2 <- paste0(CL2l, "_state")
+  
+  #Filter cell type antagonist sites for non-antagonist in others (cell type specificity) and active chromHMM annotations
+  antagonists_gr <- tbl %>% 
+    filter(get(var1[1]) == STATE) %>% 
+    filter(get(var2) %in% c("high_5mC", "neutral", "neutral+")) %>% 
+    filter(!chromHMMcl %in% c("C1_CTCF","C2_Inactive")) %>%
+    select(bin)
+  
+  antagonists_gr <- antagonists_gr %>% 
+    left_join(., bin_gr) %>% 
+    as_granges()
+  antagonists_gr$name = antagonists_gr$bin
+  
+  plyranges::write_bed(antagonists_gr, paste0(OUTDIR_rds, "SMF_MM_",CL1l, "_CMH_", STATE,"_sites_", WINDOW_BED, "bp_", DATE, ".bed"))
+}
+```
+
+```{r}
+STATE <- "antagonist"
+
+#Make bed file for ES cell line
+CL1l  <- "ES_NO"       # cell line of interest for bed file
+CL2l  <-  "NP_NO"      # reference cell line to define cell type specificity (NP used for ES cells, ES cells used for all somatic lines)
+make.bed.sites(data_full, CL1l, CL2l, STATE)
+
+#Make bed file for somatic cell lines
+CL1l_l <- c("NP_NO")#SAMPLES[!grepl("ES", SAMPLES)] #| c("MEL_NO", "NP_NO", "C2C12_NO")
+CL2l <-  "ES_NO"
+lapply(CL1l_l, function(CL1l){make.bed.sites(data_full, CL1l, CL2l, STATE)})
+
+
+```
+
+## #4 - GO term analysis
+Get and analyse GO terms for the cell type specific antagonist sites
+### Functions
+```{r}
+run.GREAT.call <- function(INPUT_BED){
+  # INPUT_BED <- INPUT_BEDs[1]
+  # CL        <- str_extract(INPUT_BED, "(?<=SMF_MM_)\\w{1,}_(NO|DE)")
+  
+  # Load bed file
+  bed_file <- read_bed(INPUT_BED)
+  names(bed_file) <- bed_file$name
+  
+  # Run GREAT analysis and extract data files
+  job <- submitGreatJob(bed_file, species = "mm10", request_interval = 30, )
+  res <- plotRegionGeneAssociationGraphs(job)
+  tb1 <- getEnrichmentTables(job)
+
+  
+  file_list <- list(RegionGeneAssociation = res, EnrichmentTables = tb1)
+  return(file_list)
+}
+
+run.GREAT.analysis <- function(GREAT_data_list, CL, TOP = 10 , ADD = ""){
+  # CL <- "ES_NO"
+  
+  GOBio <- GREAT_data_list[[2]]$`GO Biological Process` %>%
+    filter(Binom_Fold_Enrichment >= 2)
+
+
+  p1 <- plot.GO.point(GOBio, CL, TOP)
+  p1 <- p1 + plot_annotation(title = paste(CL, "antagonist sites"))
+  ggsave(plot = p1, filename = paste0(WD, OUTDIR, 'GO_process_', STATE,'_', CL, '_', DATE, ADD, '.pdf'), 
+         height = 4, width = 6)
+  p1
+}
+
+```
+
+### Plotting functions
+```{r}
+plot.GO.point <- function(GOBio_tbl, CL, TOP){
+  GOBio_tbl %>% 
+    head(TOP) %>% 
+    ggplot() +
+    geom_point(aes("", reorder(name, -Binom_Adjp_BH), color = -log(Binom_Adjp_BH)), size = 8, inherit.aes = T) +
+    scale_color_viridis_c(option = "B") +
+    labs(x = "",
+         y = "GO Biological Process",
+         color = "-log10(padj)",
+         subtitle = paste(CL, "antagonist sites")) +
+    theme_minimal() +
+    theme(panel.grid = element_blank(),
+          axis.text.y = element_text(color = "black")
+          # legend.key.size = unit(0.4, 'cm')
+          ) +
+    coord_fixed(ratio = 1)  +
+    theme(legend.key.size = unit(0.4, "cm"),
+          legend.title = element_text(size = 9),
+          legend.text = element_text(size = 7),
+          axis.title.y = element_blank(),
+          title = element_blank()) 
+}
+```
+
+
+### Run GREAT
+```{r}
+STATE       <- "antagonist"
+SAMPLES_OI  <- c("ES", "NP", "MEL", "C2C12")
+BED_DATE    <- DATE
+
+INPUT_BEDs  <- list.files(path = OUTDIR_rds,
+                    pattern = paste0("SMF_MM_.{1,}_CMH_", STATE,"_sites_", WINDOW_BED, "bp_.{1,}.bed"),
+                    full.names = TRUE)
+INPUT_BEDs  <- INPUT_BEDs[grepl(paste(SAMPLES_OI, collapse = "|"), INPUT_BEDs)]
+INPUT_BEDs  <- INPUT_BEDs[grepl(paste(BED_DATE, collapse = "|"), INPUT_BEDs)]
+SAMPLES     <- str_extract(INPUT_BEDs, "(?<=SMF_MM_)\\w{1,}_(NO|DE)")
+```
+
+```{r}
+GREAT_l <- lapply(INPUT_BEDs, run.GREAT.call)
+names(GREAT_l) <- SAMPLES
+```
+
+```{r}
+# #Run individually
+CL  <- "ES_NO"
+TOP <- 7
+nSAMP <- grep(CL, SAMPLES)
+p1 <- run.GREAT.analysis(GREAT_data_list = GREAT_l[[nSAMP]], CL, TOP)
+ggsave(plot = p1, filename = paste0(WD, OUTDIR, 'GO_process_', STATE,'_', CL, '_', DATE, '.pdf'), 
+         height = 4, width = 7)
+
+#Run all samples
+TOP <- 7
+
+lapply(seq_along(SAMPLES)[-2], function(x){
+  # x = 2
+  GREAT_data_list <- GREAT_l[[x]]
+  CL <- SAMPLES[x]
+  # CL <- "ES_NO"
+  
+  run.GREAT.analysis(GREAT_data_list, CL, TOP)
+})
+```
+
+## #5 - Gene - Region association for RNAseq
+Unfortunately, the provided enrichment tables contain no associated genes. By setting download_by = 'tsv' in getEnrichmentTables() one can download those tables, but due to the restriction from GREAT web server, only the top 500 regions can be retrieved. Therefore, we have to get those tables manually from the GREAT webpage.  
+
+In this case, we want to use all antagonist and neutral sites and not only the cell type specific ones to make sure we get all associations.  
+
+### Make Bed files
+
+```{r}
+data_l2 <- lapply(data_l, function(tbl){
+  # tbl <- data_l[[1]]
+  SAMPLE <- names(tbl)[grepl("_mean_cov_bin", names(tbl))] %>% str_remove(., "_mean_cov_bin")
+  COLNAMES <- names(tbl) %>% 
+    as_tibble() %>% 
+    mutate(names = case_when(
+      grepl("state|COR|pval", value) ~ paste(SAMPLE, value, sep = "_"),
+      TRUE~value
+    )) %>% 
+    pull(names)
+  names(tbl) <- COLNAMES
+  return(tbl)
+})
+
+data_full <- purrr::reduce(data_l2, dplyr::left_join)
+```
+
+```{r}
+# CpGs in bins
+bin_gr <- readRDS(paste0(INDIR_rds,'CGs_over_baits_101bp.rds'))
+bin_gr$bin <- names(bin_gr)
+bin_gr <- resize(bin_gr, width = WINDOW_BED, fix = "center")
+bin_gr <- as_tibble(bin_gr)
+```
+
+
+```{r}
+make.bed.sites2 <- function(tbl, CL1, STATE, FILTER_OUT_INACTIVE = TRUE){
+  # tbl <- data_full
+  # CL1 <- "ES_NO"
+  
+  FILTEROUT <- ifelse(FILTER_OUT_INACTIVE, "FilteredchromHMMcl", "notFiltered")
+  var1 <- c(paste0(CL1, "_state2"))
+  
+  tbl_filtered <- tbl %>% 
+    filter(get(var1) == STATE)
+  
+    if(FILTER_OUT_INACTIVE ==  TRUE){
+      tbl_filtered <- tbl_filtered %>% 
+        filter(!chromHMMcl %in% c("C1_CTCF","C2_Inactive"))
+      } else {
+        tbl_filtered <- tbl_filtered
+      }
+  
+  tbl_filtered <- tbl_filtered %>% 
+    select(bin)
+  
+  tbl_filtered_gr <- tbl_filtered %>% 
+    left_join(., bin_gr) %>% 
+    as_granges()
+  tbl_filtered_gr$name = tbl_filtered_gr$bin
+  names(tbl_filtered_gr) <- tbl_filtered_gr$bin
+  
+  plyranges::write_bed(tbl_filtered_gr, paste0(OUTDIR_rds, paste("SMF_MM" ,CL1, "CMH", STATE, "sites", FILTEROUT, paste0(WINDOW_BED, "bp"), DATE, sep = "_"), ".bed"))
+}
+```
+**Manual to download Gene-Region annotation tables**
+
+1. Go to the GREAT website: <http://great.stanford.edu/great/public/html/>
+2. **Species Assembly**: select "mm10"
+2. **Test regions**: Upload the bed file, you also used above for the GO term analysis
+3. **Background regions**: select "Whole Genome" or select other background bed file (e.g. neutral sites)
+4. **Association rule settings**: keep default parameters or change if wanted 
+5. Click **"submit"**
+6. Extend **"Job Description"** section
+7. Click on **"View all genomic region-gene associations."**
+8. Download **Genomic region -> gene association table** and **Gene -> genomic region association table** and save in your rds folder (OUTDIR_rds)
+9. Continue here with analyzing the Gene - Region associations
+
+```{r}
+STATE <- "antagonist"
+CL1 <- "ES_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = TRUE)
+
+CL1 <- "ES_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+CL1 <- "MEL_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+CL1 <- "NP_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+CL1 <- "C2C12_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+
+
+
+
+STATE <- "neutral+"
+CL1 <- "ES_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = TRUE)
+
+CL1 <- "ES_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+CL1 <- "MEL_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+CL1 <- "NP_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+CL1 <- "C2C12_NO"
+make.bed.sites2(data_full, CL1, STATE, FILTER_OUT_INACTIVE = FALSE)
+
+```
+
+
+
+ 
+
+
