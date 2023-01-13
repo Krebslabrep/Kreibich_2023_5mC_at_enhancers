@@ -1,0 +1,1045 @@
+---
+title: "TF centric analysis - global changes in TKOs"
+author: "Elisa Kreibich"
+date: "15/08/2022"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+  # html_document:
+  #   toc: true
+  #   toc_float: true
+  #   code_folding: hide
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-TF-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-TF-association  
+* neutral = no 5mC-TF-association  
+* agonist = positive 5mC-TF-association  
+
+
+# Introduction
+### Aim
+Analysis of SMF WT ES data to identify antagonist and neutral sites, define them and analyse their behavior in DNMT and TET TKOs.  
+
+### Input
+**Files needed to run this script and which scripts to run to create those:**
+
+| Input file name | Information | Script to create |
+|:----------------|:------------|:-----------------|
+| Final_data_tibble_CA_***DATE*** _ES_NO_TKO_DE_TETTKO_NO_cOTFBS ***TFBSCOVERAGECUTOFF***.rds  | Final tibble with states | Make_Final_TF_CMH_data_tibbles_ES_TKO_TET.Rmd  |  
+
+\
+
+### Output
+Plots of the following analyses:  
+
+* Volcano plot 5mC-TF-association in ES WT
+* Changes in TF binding frequency in DNMT TKOs
+* Changes in TF binding frequency in TET TKOs 
+* TF binding freqeuncy as a function of 5mC in WT
+* 5mC levels in different fractions of CTCF binding sites
+
+\
+
+### State definitions
+**States are defined as followed:**  
+
+* **state** 
+    * antagonist: COR <= 0.5 | pvalue < 0.05
+    * neutral: COR > 0.5 | no pvalue cutoff
+    * agonist: COR >= 2 | pvalue < 0.05
+
+* **state2**
+    * antagonist: COR <= 0.5 | pvalue < 0.05
+    * neutral+: COR > 0.8 & < 1.2 | no pvalue cutoff
+    * neutral: COR > 0.5 | no pvalue cutoff
+    * agonist: COR >= 2 | pvalue < 0.05
+
+* **state_crude**
+    * antagonist: COR <= 0.5
+    * neutral: COR > 0.5
+
+\
+
+### Additional information on this version:  
+
+* 30 bp collection window at TFBS, plus 2 10 bp bin at a distance of 10 bp: [10bp]__10bp__[30bp]__10bp__[10bp]
+* 10x coverage cutoff per TFBS
+* 5x coverage cutoff closed and TF bound fraction for CMH test
+* bins most be covered by at least 2 replicates  
+* average methylation (\*\_wmean_me\_\*) == weighted mean (wmean) of all replicates  
+
+\
+
+
+\
+
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r load libraries, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(ggrepel))
+# suppressPackageStartupMessages(library(ggforce))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(plyranges))
+suppressPackageStartupMessages(library(ggbeeswarm))
+suppressPackageStartupMessages(library(patchwork))
+
+source(paste0(WD, 'scripts/utilities/COLORS.R'))
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_TFBS.R'))
+```
+
+### Load arguments
+```{r Load arguments}
+INDIR       <- 'data_results/'
+OUTDIR      <- 'data_results/plots/'
+PLOTNAME    <- paste("TF_")
+DATE        <- Sys.Date()
+
+#Sample information
+SAMPLENAMES <- c("ES_NO", "TKO_DE", "TETTKO_NO")
+REPS        <- list(c("R1", "R2", "R5a6"), c("R1a2", "R3a4", "R5a6"),  c("R1", "R2"))
+
+INPUT_DATE  <- "2022-10-23"  #Date when Final data tibble was created
+INPUT_NAME  <- paste('Final_data_tibble_TF', INPUT_DATE, 
+                         paste(SAMPLENAMES, collapse = "_"),
+                         paste0("cOTFBS", cO_TFBS), 
+                         sep = '_')
+# INPUT_FILE <- "/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/data/Final_data_tibble_TF_2023-01-09_ES_NO_TKO_DE_TETTKO_NO_cOTFBS10.rds"
+```
+
+\
+
+### Load data
+Data tbl made in 'scripts/Make_Final_TF_CMH_data_tibbles_ES_TKO_TET.Rmd'  
+
+**ADDITIONAL DATA EDITING:**  
+
+* filter for single appearance of each genomic location  
+
+```{r}
+#Load data
+data_original <- readRDS(paste0(WD, INDIR, INPUT_NAME, ".rds"))
+# data_original <- readRDS(INPUT_FILE)
+
+data_original$TFBS %>% unique() %>% length() #5251
+
+#Filter for intermediate methylated
+data <- data_original %>% 
+  filter(!is.na(COR)) %>% 
+  filter(dplyr::between(ES_NO_wmean_me_TFBS, AVME.i.1, AVME.i.2))
+
+data$TFBS %>% unique() %>% length() #1423 #1266
+
+#Filter for uniqueness
+TFBS_unique <- data %>%
+    arrange(desc(score)) %>%
+    distinct(locus, representative.motif, .keep_all = TRUE) %>%
+    pull(TFBS)
+
+data2 <- data %>%  
+  filter(TFBS %in% TFBS_unique)
+data2$TFBS %>% unique() %>% length() #441 #367
+
+#Calculate changes 
+pc <- 0.001
+data2 <- data2 %>% 
+  mutate(
+      avMe_change_ESTKO = -ES_NO_wmean_me_TFBS, #5mC of DNMT TKOs = 0
+      avMe_change_ESTET = (TETTKO_NO_wmean_me_TFBS - ES_NO_wmean_me_TFBS),
+      log2_fc_ESTKO = log2((TKO_DE_ratio_mean_cov_fraction+pc)/(ES_NO_ratio_mean_cov_fraction+pc)),
+      log2_fc_ESTET = log2((TETTKO_NO_ratio_mean_cov_fraction+pc)/(ES_NO_ratio_mean_cov_fraction+pc))
+         )
+data2$TFBS %>% unique() %>% length() #441 #367
+data2 %>% distinct(TFBS, .keep_all = TRUE) %>% count(representative.motif)
+
+data_final <- data2 %>% 
+  filter(state2 != "agonist")
+```
+
+#### Data wrangling for motif analysis
+```{r}
+data_final_motifanalysis <- data %>%   
+  select(-c(contains("TKO"),contains("TET"),contains("fraction"))) %>% 
+  distinct(TFBS, .keep_all = T) %>% 
+  mutate(state_crude = case_when(
+    state_crude == "COR < 0.5" ~ "antagonist",
+    state_crude == "COR > 0.5" ~ "neutral"
+  ))
+
+motif_levels_MYC <- data_final_motifanalysis %>% 
+  filter(representative.motif == "MAX::MYC") %>% 
+  pull(motif) %>% 
+  unique() %>% 
+  sort()
+motif_levels_MYC
+motif_levels_MYC <- motif_levels_MYC[c(5, 3, 2, 6, 1, 4, 7, 8)]
+motif_levels_CTCF <- c("CTCF", "CTCFL")
+motif_levels <- c(motif_levels_MYC, motif_levels_CTCF)
+
+data_final_motifanalysis_M_C <- data_final_motifanalysis %>% 
+  filter(representative.motif %in% c("CTCF", "MAX::MYC")) %>% 
+  mutate(motif = factor(motif, level = motif_levels))
+  
+#Filter for uniqueness
+TFBS_unique <- data_final_motifanalysis_M_C %>%
+    arrange(motif) %>% 
+    distinct(locus, representative.motif, .keep_all = TRUE) %>%
+    pull(TFBS)
+
+data_final_motifanalysis_M_C_u <- data_final_motifanalysis_M_C %>%  
+  filter(TFBS %in% TFBS_unique)
+
+data_final_motifanalysis_M_C %>% distinct(TFBS, .keep_all = TRUE) %>% count(representative.motif)
+data_final_motifanalysis_M_C_u %>% distinct(TFBS, .keep_all = TRUE) %>% count(representative.motif)
+  
+saveRDS(data_final_motifanalysis_M_C_u, paste0(WD, OUTDIR, "TF_final_data_tbl_CTCF_MYC_Allfiltered_unique_", DATE, ".rds"))
+```
+
+
+## Analysis
+### Volcano plots - clusters
+
+```{r}
+plot_tbl <- data2 %>% 
+    distinct(TFBS, representative.motif, .keep_all = TRUE)
+ 
+antagonist_percent <- plot_tbl %>% 
+  count(state2) %>% 
+  mutate(sum = sum(n),
+         prop = round(n/sum*100,2)) %>% 
+  filter(state2 == "antagonist") %>% 
+  pull(prop)
+
+agonist_percent <- plot_tbl %>% 
+  count(state2) %>% 
+  mutate(sum = sum(n),
+         prop = round(n/sum*100,2)) %>% 
+  filter(state2 == "agonist") %>% 
+  pull(prop)
+
+pVul <- plot_tbl %>% 
+  ggplot(aes(log2(COR), -log10(pval), color = state, label = representative.motif)) +
+  geom_label_repel(data = (. %>% filter(-log(pval) >= 40)), 
+                  max.overlaps = 10,
+                  min.segment.length = 0,
+                  nudge_x      = -7 + log2(subset(plot_tbl, -log(pval) >= 40)$COR),
+                  direction    = "y",
+                  segment.color = "grey80",
+                  color = "black",
+                  point.padding = 0.2,
+                  show.legend = FALSE) +
+  scale_color_manual(values = COLORS_STATE_v3s[c(1,3,5)]) +
+  geom_point(alpha = 0.7) +
+  xlim(-7,4) +
+  ggpubr::theme_pubr() +
+  theme(legend.position = "right",
+        axis.line = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1)) +
+  labs(subtitle = paste("n =", nrow(plot_tbl), "| antagonist =", antagonist_percent, "%", "| agonist =", agonist_percent, "%"))
+pVul
+
+
+FILENAME <- "volcano_plot_"
+ADDITION <- ""
+# ggsave(plot = pVul, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 5, width = 7)
+ggsave(plot = pVul, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 5, width = 7)
+```
+
+### Perturbation
+
+**DATA EDITING:**  
+
+* calculate log2 fold change of fraction size TKO/WT, adding a small pseudo count
+* remove all duplicates (two assigned motifs per location)  
+* filter out strong outliers  
+* filter for 5mC delta  
+
+
+```{r}
+FRACTIONS = c("bound", "accessible", "closed")
+COLOR_FRACTION <- colorRampPalette(RColorBrewer::brewer.pal(9, "Set1"))(9)[c(4, 3, 2)]
+COLOR_FRACTION <- c(COLOR_FRACTION[1:2], "black")
+names(COLOR_FRACTION) <- FRACTIONS
+```
+
+```{r}
+# Violin plot function
+plot.violin <- function(input, CELLLINE, AVME_cO, OUTLIER_cO, STATE){
+  # CELLLINE      = "TKO"
+  # AVME_cO       = 1
+  # OUTLIER_cO    = -5
+  # STATE         = "state"
+  colname_log2  = names(input)[grepl("log2_fc_", names(input))]
+  colname_log2  = colname_log2[grepl(CELLLINE, colname_log2)]
+  colname_avMe  = names(input)[grepl("avMe", names(input))]
+  colname_avMe  = colname_avMe[grepl(CELLLINE, colname_avMe)]
+  
+  REFGROUP = if(grepl("2", STATE)){paste("neutral+")} else {paste("neutral")}
+  CELLLINE_TITLE = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+  AVME_TITLE = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+  input %>% 
+    filter(get(colname_avMe) >= AVME_cO) %>%
+    filter(get(colname_log2) > OUTLIER_cO) %>% 
+    add_count(get(STATE), fraction) %>% 
+    ggplot(aes(x = get(STATE), y = get(colname_log2))) +
+    geom_violin(aes(color = fraction, fill = fraction), alpha = 0.8, color = "grey30", scale = "count") +
+    geom_boxplot(fill = "white", outlier.alpha = 0, coef = 0, color = "grey30", alpha = 0.8, width = .2) +
+    geom_text(aes(x = get(STATE), y = -Inf, label = n, color = fraction), vjust = -1, check_overlap = T, size = 3) +
+    stat_compare_means(label = "p.signif", size = 3, ref.group = REFGROUP) +
+    scale_fill_manual(values = COLOR_FRACTION, guide = "none") +
+    scale_color_manual(values = COLOR_FRACTION, guide = "none") +
+    facet_wrap(~fraction) +
+    labs(x = STATE,
+         y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+         subtitle = paste0(CELLLINE_TITLE, " / WT | ", AVME_TITLE)) +
+    theme_EK() +
+    theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+ }
+
+
+# Bee plot function
+plot.bee <- function(input, CELLLINE, AVME_cO, OUTLIER_cO, STATE){
+  # CELLLINE      = "TKO"
+  # AVME_cO       = 1
+  # OUTLIER_cO    = -5
+  # STATE         = "state"
+  colname_log2  = names(input)[grepl("log2_fc_", names(input))]
+  colname_log2  = colname_log2[grepl(CELLLINE, colname_log2)]
+  colname_avMe  = names(input)[grepl("avMe", names(input))]
+  colname_avMe  = colname_avMe[grepl(CELLLINE, colname_avMe)]
+  
+  REFGROUP = if(grepl("2", STATE)){paste("neutral+")} else {paste("neutral")}
+  CELLLINE_TITLE = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+  AVME_TITLE = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+  input %>% 
+    filter(get(colname_avMe) >= AVME_cO) %>%
+    filter(get(colname_log2) > OUTLIER_cO) %>% 
+    add_count(get(STATE), fraction) %>% 
+    ggplot(aes(x = get(STATE), y = get(colname_log2))) +
+    geom_beeswarm(aes(color = fraction, color = fraction), cex = 0.6) + 
+    geom_boxplot(fill = "white", outlier.alpha = 0, coef = 0, color = "grey30", alpha = 0.8, width = .2) +
+    geom_text(aes(x = get(STATE), y = -Inf, label = n, color = fraction), vjust = -1, check_overlap = T, size = 3) +
+    stat_compare_means(label = "p.signif", size = 3, ref.group = REFGROUP) +
+    scale_fill_manual(values = COLOR_FRACTION, guide = "none") +
+    scale_color_manual(values = COLOR_FRACTION, guide = "none") +
+    facet_wrap(~fraction) +
+    labs(x = STATE,
+         y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+         subtitle = paste0(CELLLINE_TITLE, " / WT | ", AVME_TITLE)) +
+    theme_EK() +
+    theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+ }
+```
+
+
+### TKO - log2 fc | all
+```{r message=FALSE, warning=FALSE}
+CL          = "TKO"
+AVME_cO     = -1
+OUTLIER_cO  = -5
+STATE       = "state"
+
+plot.violin(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE) +
+  labs(subtitle = "DNMT TKO / WT | all") 
+plot.bee(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE) +
+  labs(subtitle = "DNMT TKO / WT | all")
+```
+### TKO - log2 fc | delta 5mC < 0.3
+```{r message=FALSE, warning=FALSE}
+CL          = "TKO"
+AVME_cO     = -1
+OUTLIER_cO  = -5
+STATE       = "state"
+
+plot_tbl <- data_final %>% 
+  filter(avMe_change_ESTKO <= -0.3)
+# plot.violin(plot_tbl, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE) +
+#   labs(subtitle = "DNMT TKO / WT | delta 5mC > 0.3")
+plot.bee(plot_tbl, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE) +
+  labs(subtitle = "DNMT TKO / WT | delta 5mC > 0.3")
+```
+
+### TKO - log2 fc | delta > 0.3 | neutral +
+```{r message=FALSE, warning=FALSE}
+CL          = "TKO"
+AVME_cO     = -1
+OUTLIER_cO  = -5
+STATE       = "state2"
+
+plot_tbl <- data_final %>% 
+  filter(avMe_change_ESTKO <= -0.3)
+# plot.violin(plot_tbl, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE) +
+#   labs(subtitle = "DNMT TKO / WT | delta 5mC > 0.3")
+plot.bee(plot_tbl, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE) +
+  labs(subtitle = "DNMT TKO / WT | delta 5mC > 0.3")
+```
+### TKO - log2 fc vs 5mC | scatter
+```{r}
+CELLLINE      = "TKO"
+# AVME_cO       = 0.3
+STATE         = "state"
+
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+# AVME_TITLE      = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+
+corr_all <- data_final %>% 
+  filter(fraction == "bound") %>% 
+  pivot_wider(names_from = state_crude, values_from = c(avMe_change_ESTKO, log2_fc_ESTKO), names_sep = "~") %>% 
+  select(contains("~")) %>% 
+  corrr::correlate(method = "pearson")
+corr_all
+
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique()
+
+
+data_final %>% 
+  filter(fraction == "bound") %>% 
+  # filter(grepl("<", state_crude)) %>%
+  # filter(get(colname_avMe) >= AVME_cO) %>%
+  ggplot(aes(x = avMe_change_ESTKO, y = log2_fc_ESTKO, color = get(STATE))) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dotted") +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  scale_color_manual(values = COLORS_STATE_v1s[c(1,3)], guide = "none") +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       x = "delta 5mC (DNMT TKO - ES) [%]",
+       subtitle = paste0(CELLLINE_TITLE, " / WT | all"),
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() 
+  # theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+```
+
+
+
+### TETTKO - log2 fc | all
+```{r message=FALSE, warning=FALSE}
+CL          = "TET"
+AVME_cO     = -1
+OUTLIER_cO  = -100
+STATE       = "state"
+
+plot.violin(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE)
+plot.bee(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE)
+```
+
+### TETTKO - log2 fc | delta > 0.3
+```{r message=FALSE, warning=FALSE}
+CL          = "TET"
+AVME_cO     = 0.3
+OUTLIER_cO  = -100
+STATE       = "state"
+
+plot.violin(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE)
+plot.bee(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE)
+```
+
+### TETTKO - log2 fc | delta > 0.3 | neutral +
+```{r message=FALSE, warning=FALSE}
+CL          = "TET"
+AVME_cO     = 0.3
+OUTLIER_cO  = -100
+STATE       = "state2"
+
+plot.violin(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE)
+plot.bee(data_final, CELLLINE = CL, AVME_cO = AVME_cO, OUTLIER_cO = OUTLIER_cO, STATE = STATE)
+```
+
+### TETTKO - log2 fc vs 5mC | scatter
+```{r}
+CELLLINE      = "TET"
+# AVME_cO       = 0.3
+STATE         = "state"
+
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+
+corr_all <- data_final %>% 
+  pivot_wider(names_from = state, 
+              values_from = c(avMe_change_ESTET, log2_fc_ESTET), 
+              names_sep = "~") %>%
+  select(contains("~")) %>%
+  corrr::correlate(method = "pearson")
+corr_all
+
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique() %>% rev()
+
+data_final %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(x = avMe_change_ESTET, y = log2_fc_ESTET, color = get(STATE))) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dotted") +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  scale_color_manual(values = COLORS_STATE_v1[c(1,3)], guide = "none") +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       x = "delta 5mC (TETTKO - ES) [%]",
+       subtitle = paste0(CELLLINE_TITLE, " / WT | all"),
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() 
+  # theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+```
+
+
+## Crude states
+```{r}
+data_final %>% filter(is.na(state_crude)) %>% nrow() #CHECK: no NAs
+
+COLOR_state_crude <- c(COLORS_STATE_v1[c(1,3)])
+names(COLOR_state_crude) <- LEVELS_state_crude[c(2:3)]
+```
+**Side info:**  
+**16 antagonist sites and 8 neutral sites are NOT COVERED in TET TKO data set!!**
+
+### TETTKO - log2 fc | violin | all
+```{r}
+CELLLINE      = "TET"
+# AVME_cO       = 0.3
+STATE         = "state_crude"
+colname_log2  = names(data_final)[grepl("log2_fc_", names(data_final))]
+colname_log2  = colname_log2[grepl(CELLLINE, colname_log2)]
+colname_avMe  = names(data_final)[grepl("avMe", names(data_final))]
+colname_avMe  = colname_avMe[grepl(CELLLINE, colname_avMe)]
+  
+REFGROUP        = if(grepl("2", STATE)){paste("neutral+")
+  } else if(grepl("crude", STATE)){paste("COR > 0.5")
+  } else {paste(STATES[2])}
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+AVME_TITLE      = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+data_final %>% 
+  add_count(get(STATE), fraction) %>%
+  ggplot(aes(x = get(STATE), y = get(colname_log2))) +
+  geom_violin(aes(color = fraction, fill = fraction), alpha = 0.8, color = "grey30", scale = "count") +
+  geom_boxplot(fill = "white", outlier.alpha = 0, coef = 0, color = "grey30", alpha = 0.6, width = .1) +
+  geom_text(aes(x = get(STATE), y = -Inf, label = n, color = fraction), vjust = -1, check_overlap = T, size = 3) + 
+  stat_compare_means(label = "p.signif", size = 3, ref.group = REFGROUP) +
+  scale_fill_manual(values = COLOR_FRACTION, guide = "none") +
+  scale_color_manual(values = COLOR_FRACTION, guide = "none") +
+  facet_grid(~fraction) +
+  labs(x = STATE,
+       y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       subtitle = paste0(CELLLINE_TITLE, " / WT | all")) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA), axis.text.x = element_text(angle = 45))
+```
+
+### TETTKO - log2 fc | violin | all | delta > 0.3
+```{r}
+CELLLINE      = "TET"
+AVME_cO       = 0.3
+STATE         = "state_crude"
+colname_log2  = names(data_final)[grepl("log2_fc_", names(data_final))]
+colname_log2  = colname_log2[grepl(CELLLINE, colname_log2)]
+colname_avMe  = names(data_final)[grepl("avMe", names(data_final))]
+colname_avMe  = colname_avMe[grepl(CELLLINE, colname_avMe)]
+  
+REFGROUP        = if(grepl("2", STATE)){paste("neutral+")
+  } else if(grepl("crude", STATE)){paste("COR > 0.5")
+  } else {paste(STATES[2])}
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+AVME_TITLE      = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+bound_present <- data_final %>%  # making sure I have the same data points for all fractions
+    filter(get(colname_avMe) >= AVME_cO) %>%
+    filter(fraction == "bound") %>% 
+    filter(!is.na(log2_fc_ESTET)) %>% 
+    pull(TFBS)
+
+pv1 <- data_final %>% 
+  # filter(representative.motif == "MAX::MYC") %>%
+  filter(get(colname_avMe) >= AVME_cO) %>%
+  filter(TFBS %in% bound_present) %>% 
+  add_count(get(STATE), fraction) %>%
+  ggplot(aes(x = get(STATE), y = get(colname_log2))) +
+  geom_violin(aes(color = fraction, fill = fraction), color = "grey30", scale = "count") +
+  geom_boxplot(fill = "white", outlier.alpha = 0, coef = 0, color = "grey30", alpha = 0.6, width = .15) +
+  geom_text(aes(x = get(STATE), y = -Inf, label = n, color = fraction), vjust = -1, check_overlap = T, size = 3) + 
+  stat_compare_means(label = "p.signif", size = 3, label.y = 2, ref.group = REFGROUP) +
+  scale_fill_manual(values = COLOR_FRACTION, guide = "none") +
+  scale_color_manual(values = COLOR_FRACTION, guide = "none") +
+  ylim(-4,2.1) +
+  facet_grid(~fraction) +
+  labs(x = STATE,
+       y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       subtitle = paste0(CELLLINE_TITLE, " / WT | ", AVME_TITLE)) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA), axis.text.x = element_text(angle = 90))
+
+pv1
+
+FILENAME <- "TETTKO_ES_fraction_fold_change_violin_"
+ADDITION <- "delta5mC_0.3_"
+# ggsave(plot = pv1, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 6, width = 4)
+# ggsave(plot = pv1, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 6, width = 4)
+```
+
+### TETTKO - log2 fc vs 5mC | scatter
+#### All
+```{r}
+CELLLINE      = "TET"
+# AVME_cO       = 0.3
+STATE         = "state_crude"
+
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+# AVME_TITLE      = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+corr_all <- data_final %>% 
+  filter(fraction == "bound") %>% 
+  pivot_wider(names_from = state_crude, values_from = c(avMe_change_ESTET, log2_fc_ESTET), names_sep = "~") %>% 
+  select(contains("~")) %>% 
+  corrr::correlate(method = "pearson")
+
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique()
+
+p9 <- data_final %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(x = avMe_change_ESTET, y = log2_fc_ESTET, color = get(STATE))) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dotted") +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm") +
+  scale_color_manual(values = COLOR_state_crude, guide = "none") +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       x = "delta 5mC (TETTKO - ES) [%]",
+       subtitle = paste0(CELLLINE_TITLE, " / WT | all"),
+       caption = paste("R antagonist =", corr_all2[1], "\nR neutral =", corr_all2[2])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+
+p9
+
+FILENAME <- "TETTKO_ES_fraction_bound_fold_change_scatter_"
+ADDITION <- ""
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 6, width = 6)
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 6, width = 6)
+
+```
+
+**Linear regression**
+```{r}
+test_matrix_a <- data_final %>% 
+  filter(fraction == "bound") %>% 
+  filter(grepl("<", state_crude)) %>% 
+  select(avMe_change_ESTET, log2_fc_ESTET)
+
+avMe.fc.a.lm <- lm(log2_fc_ESTET ~ avMe_change_ESTET, data = test_matrix_a)
+
+summary(avMe.fc.a.lm)
+
+test_matrix_n <- data_final %>% 
+  filter(fraction == "bound") %>% 
+  filter(grepl(">", state_crude)) %>% 
+  select(avMe_change_ESTET, log2_fc_ESTET)
+
+avMe.fc.n.lm <- lm(log2_fc_ESTET ~ avMe_change_ESTET, data = test_matrix_n)
+
+summary(avMe.fc.n.lm)
+```
+
+
+#### Only antagonist - colored
+```{r}
+CELLLINE      = "TET"
+# AVME_cO       = 0.3
+STATE         = "state_crude"
+
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+
+COLOR_state_crude_MYC <- c("grey50", COLOR_state_crude[2])
+names(COLOR_state_crude_MYC) <- NULL
+
+plot_tbl <- data_final %>% 
+  filter(fraction == "bound") %>%
+  filter(grepl("<", get(STATE))) %>%
+  mutate(MYC = case_when(representative.motif == "MAX::MYC" ~ TRUE, TRUE ~ FALSE))
+  
+corr_all <- plot_tbl %>% 
+  pivot_wider(names_from = MYC, values_from = c(avMe_change_ESTET, log2_fc_ESTET), names_sep = "~") %>% 
+  select(contains("~")) %>% 
+  corrr::correlate(method = "pearson")
+
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- c(FALSE,TRUE)
+
+
+p10 <- plot_tbl %>% 
+  ggplot(aes(x = avMe_change_ESTET, y = log2_fc_ESTET, color = MYC)) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dotted") +
+  geom_point(data = (. %>% filter(MYC == FALSE)), alpha = 0.8, show.legend = T) +
+  geom_point(data = (. %>% filter(MYC == TRUE)), alpha = 0.8, show.legend = T) +
+  geom_smooth(method = "lm", color = "black") +
+  scale_color_manual(values = COLOR_state_crude_MYC) +
+  scale_x_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_y_continuous(limits = c(-4,2)) +
+  # facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       x = "delta 5mC (TETTKO - ES) [%]",
+       color = "MAX::MYC",
+       subtitle = paste0(CELLLINE_TITLE, " / WT | antagonist - COR < 0.5"),
+       caption = paste("R MYC~TRUE =", corr_all2[2], "\nR MYC~FALSE =", corr_all2[1])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+
+p10
+
+FILENAME <- "TETTKO_ES_fraction_bound_fold_change_scatter_"
+ADDITION <- "antagonist_MAXMYC_"
+# ggsave(plot = p10, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 4, width = 6)
+# ggsave(plot = p10, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 4, width = 6)
+```
+
+#### Only MAX::MYC
+```{r}
+CELLLINE      = "TET"
+# AVME_cO       = 0.3
+STATE         = "state_crude"
+TF_OI         = "MAX::MYC"
+
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+# AVME_TITLE      = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+corr_all <- data_final %>% 
+  filter(fraction == "bound") %>% 
+  filter(representative.motif == TF_OI) %>% 
+  pivot_wider(names_from = state_crude, values_from = c(avMe_change_ESTET, log2_fc_ESTET), names_sep = "~") %>% 
+  select(contains("~")) %>% 
+  corrr::correlate(method = "pearson")
+corr_all
+corr_all2 <- c(round(pull(corr_all[4,3]),3), round(pull(corr_all[3,2]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique()
+
+p9 <- data_final %>% 
+  filter(representative.motif == TF_OI) %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(x = avMe_change_ESTET, y = log2_fc_ESTET, color = get(STATE))) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dotted") +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm") +
+  scale_color_manual(values = COLOR_state_crude, guide = "none") +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       x = "delta 5mC (TETTKO - ES) [%]",
+       subtitle = paste0(CELLLINE_TITLE, " / WT | ", TF_OI),
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+
+p9
+
+FILENAME <- "TETTKO_ES_fraction_bound_fold_change_scatter_"
+ADDITION <- str_replace(TF_OI, "::", "")
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 6, width = 6)
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 6, width = 6)
+```
+
+#### Only CTCF
+```{r}
+CELLLINE      = "TET"
+# AVME_cO       = 0.3
+STATE         = "state_crude"
+TF_OI         = "CTCF"
+
+CELLLINE_TITLE  = if(CELLLINE == "TET"){paste("TET TKO")} else {paste("DNMT TKO")}
+# AVME_TITLE      = if(AVME_cO < 1){paste("delta 5mC >", abs(AVME_cO))} else {paste("all")}
+
+corr_all <- data_final %>% 
+  filter(fraction == "bound") %>% 
+  filter(representative.motif == TF_OI) %>% 
+  pivot_wider(names_from = state_crude, values_from = c(avMe_change_ESTET, log2_fc_ESTET), names_sep = "~") %>% 
+  select(contains("~")) %>% 
+  corrr::correlate(method = "pearson")
+corr_all
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique()
+
+p9 <- data_final %>% 
+  filter(representative.motif == TF_OI) %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(x = avMe_change_ESTET, y = log2_fc_ESTET, color = get(STATE))) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dotted") +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm") +
+  scale_color_manual(values = COLOR_state_crude, guide = "none") +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("log2 (fold change fraction size) (",CELLLINE_TITLE," - ES)"),
+       x = "delta 5mC (TETTKO - ES) [%]",
+       subtitle = paste0(CELLLINE_TITLE, " / WT | ", TF_OI),
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+
+p9
+
+FILENAME <- "TETTKO_ES_fraction_bound_fold_change_scatter_"
+ADDITION <- str_replace(TF_OI, "::", "")
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 6, width = 6)
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 6, width = 6)
+```
+
+\
+
+### ES WT fraction frequency vs 5mC 
+#### All
+```{r}
+STATE         = "state_crude"
+
+corr_all <- data_final %>%
+  filter(fraction == "bound") %>%
+  pivot_wider(names_from = state_crude, values_from = c(ES_NO_wmean_me_TFBS, ES_NO_ratio_mean_cov_fraction), names_sep = "~") %>%
+  select(contains("~")) %>%
+  corrr::correlate(method = "pearson")
+corr_all
+
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique()
+
+p9 <- data_final %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(x = ES_NO_wmean_me_TFBS, y = ES_NO_ratio_mean_cov_fraction, color = get(STATE))) +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm") +
+  scale_y_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_x_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_color_manual(values = COLOR_state_crude, guide = "none") +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("TF binding frequency (%)"),
+       x = "5mC - WT ES (%)",
+       subtitle = "ES WT | all",
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+
+p9
+
+FILENAME <- "ES_fraction_bound_5mC_scatter_"
+ADDITION <- ""
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 6, width = 6)
+# ggsave(plot = p9, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 6, width = 6)
+
+
+```
+#### MAX::MYC colored
+```{r}
+plot_tbl <- data_final %>% 
+  filter(fraction == "bound") %>%
+  mutate(MYC = case_when(representative.motif == "MAX::MYC" ~ TRUE, TRUE ~ FALSE))
+
+
+COLOR_state_crude_MYC <- c("grey50", COLOR_state_crude[2])
+names(COLOR_state_crude_MYC) <- NULL
+
+corr_all <- plot_tbl %>%
+  filter(fraction == "bound") %>%
+  pivot_wider(names_from = state_crude, values_from = c(ES_NO_wmean_me_TFBS, ES_NO_ratio_mean_cov_fraction), names_sep = "~") %>%
+  select(contains("~")) %>%
+  corrr::correlate(method = "pearson")
+
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique()
+
+p10 <- plot_tbl %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(x = ES_NO_wmean_me_TFBS, y = ES_NO_ratio_mean_cov_fraction, color = MYC)) +
+  geom_point(data = (. %>% filter(MYC==FALSE)), alpha = 0.8) +
+  geom_point(data = (. %>% filter(MYC==TRUE)), alpha = 0.8) +
+  geom_smooth(method = "lm",  color = "black") +
+  scale_y_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_x_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_color_manual(values = COLOR_state_crude_MYC) +
+  facet_wrap(~state_crude, ncol = 1) +
+  labs(y = paste0("TF binding frequency (%)"),
+       x = "5mC - WT ES (%)",
+       subtitle = "ES WT | all",
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+p10
+
+FILENAME <- "ES_fraction_bound_5mC_scatter_"
+ADDITION <- "MYC_col_"
+# ggsave(plot = p10, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 6, width = 6)
+# ggsave(plot = p10, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 6, width = 6)
+```
+Not really driven by MAX::MYC, which overall doesn't show high binding frequencies.  
+
+\
+
+```{r}
+plot_tbl %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(x = ES_NO_wmean_me_TFBS, y = ES_NO_ratio_mean_cov_fraction, color = MYC)) +
+  geom_point(data = (. %>% filter(MYC==FALSE)), alpha = 0.8) +
+  geom_point(data = (. %>% filter(MYC==TRUE)), alpha = 0.8) +
+  geom_label_repel(data = (. %>% filter(MYC==FALSE) %>% filter(ES_NO_ratio_mean_cov_fraction > 0.6)), 
+                   aes(label = representative.motif), alpha = 0.8, 
+                   max.overlaps = 100,
+                min.segment.length = 0,
+                nudge_x      = -1,
+                point.padding = 0.5,
+                show.legend = FALSE) +
+  # geom_smooth(method = "lm") +
+  scale_y_continuous(limits = c(0,1), labels = scales::label_number(scale = 1*100)) +
+  scale_x_continuous(limits = c(-0.2,1), labels = scales::label_number(scale = 1*100)) +
+  scale_color_manual(values = COLOR_state_crude_MYC) +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("TF binding frequency (%)"),
+       x = "5mC - WT ES (%)",
+       subtitle = "ES WT | all",
+       caption = paste("R antagonist =", corr_all2[1], "\nR neutral =", corr_all2[2])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+
+```
+
+High binding frequencies at low 5mC are rather driven by CTCF.
+
+\
+
+#### MAX::MYC only
+```{r}
+MOI <- "MAX::MYC"
+plot_tbl <- data_final %>% 
+  filter(fraction == "bound") %>%
+  mutate(MYC = case_when(representative.motif == "MAX::MYC" ~ TRUE, TRUE ~ FALSE)) %>%
+  filter(representative.motif == MOI)
+
+corr_all <- plot_tbl %>% 
+  pivot_wider(names_from = state_crude, values_from = c(ES_NO_wmean_me_TFBS, ES_NO_ratio_mean_cov_fraction), names_sep = "~") %>%
+  select(contains("~")) %>%
+  corrr::correlate(method = "pearson")
+corr_all
+
+corr_all2 <- c(round(pull(corr_all[4,3]),3), round(pull(corr_all[3,2]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique() %>% rev()
+
+p19 <- plot_tbl %>% 
+  ggplot(aes(x = ES_NO_wmean_me_TFBS, y = ES_NO_ratio_mean_cov_fraction, color = state_crude)) +
+  geom_point(data = (. %>% filter(MYC==FALSE)), alpha = 0.8) +
+  geom_point(data = (. %>% filter(MYC==TRUE)), alpha = 0.8) +
+  geom_smooth(method = "lm") +
+  scale_y_continuous(limits = c(0, 0.45), labels = scales::label_number(scale = 1*100)) +
+  scale_x_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_color_manual(values = COLOR_state_crude, guide = "none") +
+  facet_wrap(~state_crude, ncol = 1) +
+  labs(y = paste0("TF binding frequency (%)"),
+       x = "5mC - WT ES (%)",
+       subtitle = "ES WT | MAX::MYC only",
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+p19
+
+
+FILENAME <- "ES_fraction_bound_5mC_scatter_"
+ADDITION <- "MYC_"
+# ggsave(plot = p19, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 4, width = 4)
+# ggsave(plot = p19, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 4, width = 4)
+
+```
+Negative correlation present, but not that strong since the overall range is not high.
+
+\
+
+#### CTCF only
+```{r}
+MOI      <- "CTCF"
+plot_tbl <- data_final %>%
+  filter(fraction == "bound") %>%
+  filter(representative.motif == MOI)
+
+corr_all <- plot_tbl %>% 
+  pivot_wider(names_from = state_crude, values_from = c(ES_NO_wmean_me_TFBS, ES_NO_ratio_mean_cov_fraction), names_sep = "~") %>%
+  select(contains("~")) %>%
+  corrr::correlate(method = "pearson")
+
+corr_all2 <- c(round(pull(corr_all[3,2]),3), round(pull(corr_all[4,3]),3))
+names(corr_all2) <- data_final %>% pull(state_crude) %>% unique()
+
+p21 <- plot_tbl %>% 
+  ggplot(aes(x = ES_NO_wmean_me_TFBS, y = ES_NO_ratio_mean_cov_fraction, color = state_crude)) +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm") +
+  scale_y_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_x_continuous(labels = scales::label_number(scale = 1*100)) +
+  scale_color_manual(values = COLOR_state_crude, guide = "none") +
+  facet_wrap(~get(STATE), ncol = 1) +
+  labs(y = paste0("TF binding frequency (%)"),
+       x = "5mC WT ES (%)",
+       subtitle = "ES WT | CTCF only",
+       caption = paste("R neutral =", corr_all2[2], "\nR antagonist =", corr_all2[1])) +
+  theme_EK() +
+  theme(panel.border = element_rect(color = "black", size = 0.75, fill = NA))
+p21
+
+
+FILENAME <- "ES_fraction_bound_5mC_scatter_"
+ADDITION <- "CTCF_"
+# ggsave(plot = p21, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 4, width = 4)
+# ggsave(plot = p21, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 4, width = 4)
+
+```
+
+
+
+### 5mC in different fractions
+#### CTCF
+```{r}
+STATE    <- "state_crude"
+MOI      <- "CTCF"
+REFGROUP <- "COR > 0.5"
+plot_tbl <- data_final %>%
+  filter(representative.motif == MOI)
+
+p21 <- plot_tbl %>% 
+  filter(fraction == "bound") %>%
+  ggplot(aes(state_crude, ES_NO_wmean_me_TFBS, fill = state_crude)) +
+  geom_violin(alpha = 1, color = "grey30", scale = "count", show.legend = F) +
+  stat_compare_means(label = "p.signif", size = 3, ref.group = REFGROUP) +
+  # geom_beeswarm(show.legend = F) +
+  geom_boxplot(fill = "white", outlier.alpha = 0, coef = 0, color = "grey30", alpha = 0.8, width = .1) +
+  scale_fill_manual(values = COLOR_state_crude) +
+  theme_EK()
+p21
+
+p22 <- plot_tbl %>% 
+  ggplot(aes(state_crude, ES_NO_wmean_me_fraction, fill = state_crude)) +
+  geom_violin(alpha = 1, color = "grey30", scale = "count", show.legend = F) +
+  stat_compare_means(label = "p.signif", size = 3, ref.group = REFGROUP) +
+  # geom_beeswarm(show.legend = F) +
+  geom_boxplot(fill = "white", outlier.alpha = 0, coef = 0, color = "grey30", alpha = 0.8, width = .1) +
+  scale_fill_manual(values = COLOR_state_crude) +
+  facet_wrap(~fraction) +
+  theme_EK()
+p22
+
+FILENAME <- "ES_5mC_levels_"
+ADDITION <- "CTCF_sites_states_crude_v2_"
+ggsave(plot = p21, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 3.5, width = 4.5)
+# ggsave(plot = p21, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".png"), height = 3.5, width = 4.5)
+
+
+ADDITION <- "CTCF_sites_states_crude_fractions_v2_"
+ggsave(plot = p22, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 3.5, width = 4.5)
+```

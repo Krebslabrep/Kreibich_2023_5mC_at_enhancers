@@ -1,0 +1,304 @@
+---
+title: "Analysis TFBS - Methylation versus binding"
+author: "Elisa Kreibich"
+date: "18/08/2022"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+  # html_document:
+  #   toc: true
+  #   toc_float: true
+  #   code_folding: hide
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-TF-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-TF-association  
+* neutral = no 5mC-TF-association  
+* agonist = positive 5mC-TF-association  
+
+
+# Introduction
+### Aim
+Analysis of SMF WT ES data for specific TFs of interest:methylation patterns, state frequencies, methylation in TF bound vs nucleosome bound (close) fraction.
+
+### Input
+**Files needed to run this script and which scripts to run to create those:**
+
+| Input file name | Information | Script to create |
+|:----------------|:------------|:-----------------|
+| Final_data_tibble_CA_***DATE*** _ES_NO_TKO_DE_TETTKO_NO_cOTFBS ***TFBSCOVERAGECUTOFF***.rds  | Final tibble with states | Make_Final_TF_CMH_data_tibbles_ES_TKO_TET.Rmd  |  
+
+\
+
+### Output
+Plots of the following analyses:  
+
+* Histogram of TFBS methylation distribution of individual TFs of interest  
+* Volcano plot 5mC-TF-association in ES WT for individual TFs of interest  
+* Bar chart of state distribution for individual TFs of interest  
+* Scatter plots of methylation in TF bound vs nucleosome bound (closed) fractions for individual TFs of interest  
+
+\
+
+### State definitions
+**States are defined as followed:**  
+
+* **state** 
+    * antagonist: COR <= 0.5 | pvalue < 0.05
+    * neutral: COR > 0.5 | no pvalue cutoff
+    * agonist: COR >= 2 | pvalue < 0.05
+
+* **state2**
+    * antagonist: COR <= 0.5 | pvalue < 0.05
+    * neutral+: COR > 0.8 & < 1.2 | no pvalue cutoff
+    * neutral: COR > 0.5 | no pvalue cutoff
+    * agonist: COR >= 2 | pvalue < 0.05
+
+* **state_crude**
+    * antagonist: COR <= 0.5
+    * neutral: COR > 0.5
+
+\
+
+### Additional information on this version:  
+
+* 30 bp collection window at TFBS, plus 2 10 bp bin at a distance of 10 bp: [10bp]__10bp__[30bp]__10bp__[10bp]
+* 10x coverage cutoff per TFBS
+* 5x coverage cutoff closed and TF bound fraction for CMH test
+* bins most be covered by at least 2 replicates for CMH test  
+* average methylation (\*\_wmean_me\_\*) == weighted mean (wmean) of all replicates  
+
+\
+
+
+\
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r load libraries, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(scales))
+
+source(paste0(WD, 'scripts/utilities/COLORS.R'))
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_TFBS.R'))
+```
+
+### Set arguments
+```{r Load arguments}
+INDIR       <- 'data_results/'
+OUTDIR      <- 'data_results/plots/'
+PLOTNAME    <- paste("TF_")
+DATE        <- Sys.Date()
+
+#Sample information
+SAMPLENAMES <- c("ES_NO", "TKO_DE", "TETTKO_NO")
+REPS        <- list(c("R1", "R2", "R5a6"), c("R1a2", "R3a4", "R5a6"),  c("R1", "R2"))
+
+INPUT_DATE  <- "2022-10-23"  #Date when Final data tibble was created
+INPUT_NAME  <- paste('Final_data_tibble_TF', INPUT_DATE, 
+                         paste(SAMPLENAMES, collapse = "_"),
+                         paste0("cOTFBS", cO_TFBS), 
+                         sep = '_')
+# INPUT_FILE <- "/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/data/Final_data_tibble_TF_2023-01-09_ES_NO_TKO_DE_TETTKO_NO_cOTFBS10.rds"
+
+#Motifs of interest
+MOI           = c("MAX::MYC", "CTCF", "NRF1", "NFYA", "REST")
+LEVELS_state_crude = c("fully methylated", paste("COR <", COR.i), paste("COR >", COR.i),  "unmethylated")
+
+```
+
+
+### Load data
+Data tbl made in 'scripts/Make_Final_TF_CMH_data_tibbles_ES_TKO_TET.Rmd'  
+
+**PRIOR DATA EDITING:**  
+
+* coverage cutoff >= 10  
+* filtering for TFBS with 5% bound  
+* filtering for TFBS that are covered in at least 2 replicates (have a COR value, because the ones without are only present in ONE replicate)  
+
+
+**ADDITIONAL DATA EDITING:**  
+
+* filter for single appearance of each genomic location  
+* only look at TFs of interest  
+
+```{r}
+#Load data & remove TKO data (which is not necessary in this script)
+data_original <- readRDS(paste0(WD, INDIR, INPUT_NAME)) %>% 
+  # readRDS(INPUT_FILE) %>% 
+  select(-contains("TKO"))
+# data_original$TFBS %>% unique() %>% length()
+
+#Change state_crude levels, filter for motifs of interest
+data <- data_original %>% 
+  mutate(state_crude = factor(state_crude, levels = LEVELS_state_crude)) %>%  
+  filter(representative.motif %in% MOI)
+# data$TFBS %>% unique() %>% length()
+
+#Filter for unique TFBS locations
+TFBS_unique <- data %>%
+    mutate(strand = as.character(strand)) %>% 
+    arrange(desc(score)) %>%
+    distinct(locus, representative.motif, .keep_all = TRUE) %>%
+    pull(TFBS)
+
+data_final <- data %>%  
+  filter(TFBS %in% TFBS_unique)
+# data$TFBS %>% unique() %>% length()
+
+data_final %>% distinct(TFBS, .keep_all = TRUE) %>% count(representative.motif)
+
+```
+## Analysis
+### Histogram of TFBS methylations
+```{r fig.height=6, fig.width=10}
+p1 <- data_final %>% 
+  distinct(TFBS, .keep_all = T) %>% 
+  ggplot(aes(ES_NO_wmean_me_TFBS)) +
+  geom_histogram(binwidth = 0.1, color = "black") +
+  facet_wrap(~representative.motif, scales = "free", ncol = 3) +
+  scale_x_continuous(limits = c(-0.05,1.05), breaks = breaks_width(0.50), labels = label_number(scale = 1 * 1e2)) +
+  theme_pubclean() +
+  theme(panel.border = element_rect(fill = NA, color = "black"), 
+        strip.background.x = element_rect(color = "black"),
+        axis.ticks = element_line("black"), 
+        axis.ticks.length = unit(1.5, "mm"),
+        axis.text = element_text(color = "black")) +
+  labs(x = "mean 5mC of TFBS (%)", 
+       subtitle = "TFBS bound at least 5%")
+p1
+FILENAME <- "motifs_TFBS_5mC_histogram_"
+# ggsave(plot = p1, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, DATE, "_cO10.pdf"), height = 5, width = 8)
+```
+
+
+### Volcano plot 5mC-TF-associtiation for individual TFs
+```{r fig.height=6, fig.width=10}
+state_type <- "state"
+
+p5.2 <- data_final %>% 
+  filter(!grepl("methylated", get(state_type))) %>% 
+  distinct(TFBS, .keep_all = T) %>% 
+  add_count(representative.motif, get(state_type)) %>% 
+  ggplot(aes(log2(COR), -log10(pval), color = get(state_type))) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_text(data = (. %>% filter(get(state_type) == "antagonist") %>% distinct(representative.motif, .keep_all = T)), 
+            aes(x=-Inf, y = Inf, label = n), hjust = -1, vjust = 2, show.legend = F) +
+  geom_text(data = (. %>% filter(get(state_type) == "neutral") %>% distinct(representative.motif, get(state_type), .keep_all = T)), 
+            aes(x=-Inf, y = Inf, label = n), hjust = -1, vjust = 4, show.legend = F) +
+  scale_color_manual(values = COLORS_STATE_v4[c(1,3,4)]) +
+  facet_wrap(~representative.motif, ncol = 3, scales = "free_y") +
+  xlim(-5,5) +
+  theme(legend.position = "bottom") +
+  labs(#x = "5mC closed fraction",
+       #y = "5mC bound fraction",
+       subtitle = "Volcano plots CMH test - TF motifs",
+       color = state_type)
+p5.2
+FILENAME <- "motifs_TFBS_volcanos_"
+ADDITION <- ""
+# ggsave(plot = p5.2, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, "_cO10.pdf"), height = 5, width = 8)
+```
+
+### Crude states - Bar chart
+```{r }
+state_type <- "state_crude"
+data_final_plot <- data_final %>% 
+  filter(get(state_type) != "fully methylated") %>% 
+  distinct(TFBS, .keep_all = TRUE) %>% 
+  count(representative.motif, state_crude, name = "value") %>% 
+  add_count(representative.motif, wt = value, name = "sum") %>% 
+  mutate(prop = round(value/sum, 2)) 
+
+data_final_plot_me <- data_final %>% 
+  filter(get(state_type) != "fully methylated") %>% 
+  filter(get(state_type) != "unmethylated") %>% 
+  distinct(TFBS, .keep_all = TRUE) %>% 
+  count(representative.motif, state_crude, name = "value") %>% 
+  add_count(representative.motif, wt = value, name = "sum") %>% 
+  mutate(prop_m = round(value/sum, 2)) %>% 
+  select(representative.motif, state_crude, prop_m) %>% 
+  filter(grepl("<", state_crude))
+
+data_final_plot <- data_final_plot %>% 
+  left_join(., data_final_plot_me)
+
+data_final_plot_order <- data_final_plot %>% 
+  filter(state_crude == "unmethylated") %>% 
+  arrange(desc(prop)) %>% 
+  pull(representative.motif)
+
+data_final_plot$representative.motif <- factor(data_final_plot$representative.motif, levels = data_final_plot_order)
+
+p11 <- data_final_plot %>% 
+  ggplot(aes(representative.motif, value, label = paste(prop_m*100, "%"), fill = get(state_type))) +
+  geom_bar(position="fill", stat = "identity", color = "black") +
+  geom_text(data = (. %>% filter(!is.na(prop_m))), aes(representative.motif, 1-prop, label = paste(prop_m*100, "%")), vjust = -1) +
+  scale_y_continuous(breaks = breaks_width(0.25), labels = scales::percent) +
+  scale_fill_manual(values = COLORS_STATE_v6[c(2,1,3)]) +
+  theme_pubclean() +
+  theme(panel.border = element_rect(fill = NA, color = "black"), 
+        strip.background.x = element_rect(color = "black"),
+        axis.ticks = element_line("black"), 
+        axis.ticks.length = unit(1.5, "mm"),
+        axis.text = element_text(color = "black"), panel.grid.major.y = element_blank()) +
+  labs(x = "", 
+       y = "percentage TFBS states",
+       fill = "TFBS states",
+       subtitle = "TFBS bound at least 5%")
+p11
+FILENAME <- "motifs_TFBS_5mC_crude_states_ratios_barplot_"
+ADDITION <- ""
+# ggsave(plot = p11, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, ".pdf"), height = 5, width = 7)
+```
+
+
+
+### Crude states - Scatter
+```{r}
+p12 <- data_final %>% 
+  filter(get(state_type) != "fully methylated") %>% 
+  pivot_wider(names_from = "fraction", values_from = contains("_fraction"), names_sep = "_") %>%
+  filter(!is.na(ES_NO_wmean_me_fraction_closed) & !is.na(ES_NO_wmean_me_fraction_bound)) %>% 
+  add_count(representative.motif) %>% 
+  ggplot(aes(ES_NO_wmean_me_fraction_closed, ES_NO_wmean_me_fraction_bound, color = get(state_type))) +
+  geom_abline(slope = 1, color = "grey30", linetype = 2, size = 0.6) +
+  geom_point(size = 1.5, alpha = 0.8) +
+  geom_text(aes(x = -Inf, y = Inf, label = n), color = "black", check_overlap = T, hjust = -0.5, vjust = 1.5) +
+  scale_color_manual(values = COLOR_state_crude) +
+  facet_wrap(~representative.motif, ncol = 3) +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(limits = c(0,1), labels = label_number(scale = 1*100)) +
+  scale_y_continuous(limits = c(0,1), labels = label_number(scale = 1*100)) +
+  labs(x = "5mC closed fraction (%)",
+       y = "5mC bound fraction (%)",
+       subtitle = "5mC bound vs closed fraction - by motifs | crude states",
+       color = state_type)  +
+  theme_pubclean() +
+  theme(panel.border = element_rect(fill = NA, color = "black"), 
+        strip.background.x = element_rect(color = "black"),
+        axis.ticks = element_line("black"), 
+        axis.ticks.length = unit(1.5, "mm"),
+        axis.text = element_text(color = "black"), panel.grid.major.y = element_blank()) 
+  
+p12
+FILENAME <- "motifs_TFBS_5mC_boundVSclosed_crude_states_scatter_"
+ADDITION <- ""
+# ggsave(plot = p12, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, "_cO10.pdf"), height = 6, width = 8)
+# ggsave(plot = p12, filename = paste0(WD, OUTDIR, PLOTNAME, FILENAME, ADDITION, DATE, "_cO10.png"), height = 6, width = 8)
+
+```
