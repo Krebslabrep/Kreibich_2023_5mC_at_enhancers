@@ -1,0 +1,2 @@
+GRange_mapped_jaspar2018_ChIP_score10_inBaits_BANP.rds filter=lfs diff=lfs merge=lfs -text
+mapped_jaspar2018_ChIP_score10_inBaits_BANP_all_locus_NONunique.rds filter=lfs diff=lfs merge=lfs -text
