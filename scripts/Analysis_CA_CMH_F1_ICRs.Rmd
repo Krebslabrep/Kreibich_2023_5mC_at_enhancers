@@ -1,0 +1,324 @@
+---
+title: "CMH analysis on F1 data - allelic differences"
+author: "Elisa Kreibich"
+date: "15/11/2022"
+output:
+  html_notebook:
+    code_folding: hide
+  html_document:
+    code_folding: hide
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+**Disclaimer about version**  
+The current version does not use the final data tbl as input files. The content of the used tbl is however the same (mean methylation, states, etc.)  
+
+\
+
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+Analysis of SMF data from hybrid F1 data. Compare ICRs to antagonist sites to figure whether antagonist sites are also regulated allel-specifically.  
+In order to show the difference between antagonist sites and imprinted sites, we will use F1 data for which we can separate the alleles and align and analyse them individually. For this I run the CMH test on the two alleles separately.
+
+### Information on this version:  
+
+* No coverage cutoff for SM analysis  
+* 101 bp collection window around CpG  
+* average methylation --> weighted mean of all replicates  
+
+\
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r libraries, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(patchwork))
+suppressPackageStartupMessages(library(ggrepel))
+
+source(paste0(WD, 'scripts/utilities/COLORS.R'))
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_CA.R'))
+```
+
+### Set arguments
+```{r arguments}
+DATE            <- Sys.Date()
+INDIR_rds       <- 'data/'
+INDIR           <- 'data_results/'
+OUTDIR          <- 'data_results/plots/'
+
+#Define file path of the QuasR file with the separatetely aligned alleles
+QuasR_tbl       <- read.table('./QuasR_aligned_files_ES_F1_129_Bl6_rmdup.txt', header = T) 
+SAMPLENAMES_A   <- QuasR_tbl[,2][grepl("^A", QuasR_tbl[,2])]
+SAMPLEREPS_A    <- str_extract(SAMPLENAMES_A[-1], pattern = "F.{1,3}")
+SAMPLENAMES_R   <- QuasR_tbl[,2][grepl("^R", QuasR_tbl[,2])]
+SAMPLEREPS_R    <- str_extract(SAMPLENAMES_R[-1], pattern = "F.{1,3}")
+CELLLINE        <- "ES_F1_CAST_129"
+
+# Define file path of tbl with average methylation data (From QuasR methylation call | Can also be calculated from coverage + methylation data)
+#Define path 
+INDIR_avme_file <- paste0('', CELLLINE,'_NO_ALL_av_meth_context_NArm_cObin', cO_bin, '_NWCGW.rds')) 
+```
+
+### Load in data
+```{r imprinted, message=FALSE}
+# CpGs in imprinted regions
+i.impr <- readRDS(paste0(INDIR_rds, 'Data_tbl_ICRs_curated.rds')
+```
+
+```{r coverage data, message=FALSE}
+# Coverage data (Made with Single_molecule_methylation_analysis_CG_GC_WG_MM_CGcentered_EK2022)
+bins_cytosine <- readRDS(paste0(INDIR_rds, 'CGs_over_baits_', WDW_SIZE,'bp_NWCGW.rds'))
+
+input_cov_file_A <- paste0(WD, INDIR, 'Coverage_matrix_', SAMPLENAMES_A[1], '_', paste(SAMPLEREPS_A[1], collapse = '_'), '_', WDW_SIZE, 'bp.rds')
+input_cov_file_R <- paste0(WD, INDIR, 'Coverage_matrix_', SAMPLENAMES_R[1], '_', paste(SAMPLEREPS_R[1], collapse = '_'), '_', WDW_SIZE, 'bp.rds')
+
+make.cov.tbl <- function(input) {
+  readRDS(input) %>% 
+    count(sample, bin, wt = n, name = "coverage") %>% 
+    left_join(., bins_cytosine) %>% 
+    mutate(cell_line = CELLLINE,
+           allel = str_extract(sample, "^\\w{1}"),
+           replicate = paste0("R", str_extract(sample, ".{1}$"))) %>%
+    select(-c(sample, type)) %>% 
+    filter(!is.na(coverage))
+}
+
+cov_tbl_A <- make.cov.tbl(input_cov_file_A)
+cov_tbl_R <- make.cov.tbl(input_cov_file_R)
+
+cov_tbl <- rbind(cov_tbl_A, cov_tbl_R)
+```
+
+```{r Average methylation, message=FALSE}
+# Average methylation data (From QuasR methylation call | Can also be calculated from coverage + methylation data)
+avme <- readRDS(INDIR_avme_file)
+```
+```{r Average methylation data, eval=FALSE, message=FALSE}
+# Weighted mean average methylation
+calculate.weighted.avme <- function(cov_tbl, avme_tbl){
+  # cov_tbl <-  cov_tbl_A
+  # avme_tbl <- filter(avme, allel == "A")
+  left_join(cov_tbl, avme_tbl) %>%
+    group_by(bin) %>% 
+    mutate(wmean_avMe = weighted.mean(av_me, coverage, na.rm = T)) %>%   
+    mutate(mean_cov = median(coverage, na.rm = T)) %>% 
+    select(-c(context, av_me, context)) %>% 
+    distinct() %>% 
+    filter(!is.na(wmean_avMe)) %>% 
+    ungroup()
+}
+
+avme_cov_A <- calculate.weighted.avme(cov_tbl_A, filter(avme, allel == "A"))
+avme_cov_R <- calculate.weighted.avme(cov_tbl_R, filter(avme, allel == "R"))
+```
+
+```{r}
+all_tbl <- readRDS('/g/krebs/kreibich/analysis/SMF/F1/F1_data_CMH_avMe_cov_all.rds') %>% 
+  mutate(impr_regions = ifelse(bin %in% i.impr$bin, TRUE, FALSE))
+```
+
+```{r}
+# state1 == only rest, no neutral
+# state2 == with neutral
+
+# Filtered for intermediate methylation
+all_tbl_flt <- all_tbl %>% 
+  filter(between(wmean_avMe, AVME.i.1, AVME.i.2)) %>% 
+  mutate(state1 = case_when(
+      COR <= COR.i & pval < PVAL.i & impr_regions == FALSE ~ "antagonist",
+      impr_regions == TRUE ~ "ICR",
+      TRUE ~ "neutral")) %>% 
+  mutate(state1 = factor(state1, levels = c("rest", "antagonist", "ICR"))) %>% 
+  mutate(state2 = case_when(
+      COR <= COR.i & pval < PVAL.i & impr_regions == FALSE ~ "antagonist",
+      between(COR, COR.ntrl.i.1, COR.ntrl.i.2) & pval <= PVAL.ntrl.i & impr_regions == FALSE ~ "neutral+",
+      impr_regions == TRUE ~ "ICR",
+      TRUE ~ "neutral")) %>% 
+  mutate(state2 = factor(state2, levels = c("neutral", "neutral+", "antagonist", "ICR")))
+
+# NOT filtered for intermediate methylation
+all_tbl_all <- all_tbl %>% 
+  mutate(state1 = case_when(
+      COR <= COR.i & pval < PVAL.i & impr_regions == FALSE ~ "antagonist",
+       impr_regions == TRUE ~ "ICR",
+      TRUE ~ "neutral")) %>% 
+  mutate(state1 = factor(state1, levels = c("rest", "antagonist", "ICR"))) %>% 
+  mutate(state2 = case_when(
+      COR <= COR.i & pval < PVAL.i & impr_regions == FALSE ~ "antagonist",
+      between(COR, COR.ntrl.i.1, COR.ntrl.i.2) & pval <= PVAL.ntrl.i & impr_regions == FALSE ~ "neutral+",
+      impr_regions == TRUE ~ "ICR",
+      TRUE ~ "neutral")) %>% 
+  mutate(state2 = factor(state2, levels = c("neutral", "neutral+", "antagonist", "ICR"))) %>% 
+  filter(!is.na(allel))
+```
+
+```{r}
+#Load in F0 (ES WT data) as Final data tbl from Make_Final_CG_CMH_data_tibbles_cell_line.Rmd
+
+ES_F0_all_tbl <- readRDS(WD, INDIR, 'Final_data_tibble_CA_2022-10-21_SMF_MM_ES_NO_R1_R2_R5a6_cObin10_cOCMH30_states.rds')
+```
+
+\
+
+## Analysis
+## Filter out C to T SNPs
+Since C to T SNPs in the CAST genome would lead to wrong methylation counts, CpG candidates with such a SNP have to be filtered out.
+
+```{r message=FALSE, warning=FALSE}
+SNPs_CtT <- readRDS('/g/krebs/kreibich/analysis/SMF/F1/SNPs_CtT_bins_vector.rds')
+SNPs_CtT_gr <- readRDS('/g/krebs/kreibich/analysis/SMF/F1/SNPs_CtT_bins_gr.rds')
+SNPs_CtT <- names(SNPs_CtT_gr)
+
+all_tbl_flt_SNPs <- all_tbl_flt %>% 
+  filter((bin %in% SNPs_CtT))
+
+all_tbl_flt_nSNPs <- all_tbl_flt %>% 
+  filter(!(bin %in% SNPs_CtT))
+```
+
+```{r message=FALSE, warning=FALSE}
+# Weighted mean average methylation
+calculate.weighted.avme <- function(cov_tbl, avme_tbl){
+  # cov_tbl <-  cov_tbl_A
+  # avme_tbl <- filter(avme, allel == "A")
+  left_join(cov_tbl, avme_tbl) %>%
+    group_by(bin) %>% 
+    mutate(wmean_avMe = weighted.mean(av_me, coverage, na.rm = T)) %>%   
+    mutate(mean_cov = median(coverage, na.rm = T)) %>% 
+    ungroup() %>% 
+    group_by(bin, allel) %>% 
+    mutate(wmean_avMe_allel = weighted.mean(av_me, coverage, na.rm = T)) %>%   
+    mutate(mean_cov_allel = median(coverage, na.rm = T)) %>% 
+    dplyr::select(-c(context, av_me, context, coverage, replicate)) %>% 
+    distinct() %>% 
+    filter(!is.na(wmean_avMe)) %>% 
+    ungroup()
+}
+
+avme_cov <- calculate.weighted.avme(cov_tbl, avme)
+all_tbl_all_2 <- all_tbl_all %>% 
+  dplyr::select(bin, pval, COR, cell_line, allel, state1) %>% 
+  distinct() %>% 
+  left_join(., avme_cov)
+```
+  
+In addition, we need to filter for coverage when we want to look at average methylation.
+
+### Violin plots on methylation difference
+Coverage cutoff is 10 reads in each allel.  
+
+```{r}
+CO <- 10
+plot_tbl <- all_tbl_all_2 %>% 
+  filter(mean_cov >= CO) %>% 
+  filter(mean_cov_allel >= CO) %>% 
+  filter(dplyr::between(wmean_avMe, AVME.i.1, AVME.i.2)) %>% 
+  add_count(bin) %>% 
+  filter(n == 2) %>% 
+  dplyr::select(-n) %>% 
+  dplyr::select(bin, allel, state1, wmean_avMe, wmean_avMe_allel, cytosine)
+
+wmean_avMe_tbl <- plot_tbl %>% dplyr::select(bin, wmean_avMe, state1, cytosine) %>% mutate(allel = "R+A")
+
+plot_tbl <- plot_tbl %>% 
+  dplyr::select(bin, allel, wmean_avMe_allel, state1, cytosine) %>% 
+  dplyr::rename(wmean_avMe = wmean_avMe_allel) %>% 
+  rbind(., wmean_avMe_tbl) %>% 
+  mutate(allel = factor(allel, levels = c("R+A", "R", "A")))
+```
+
+
+#### Genes of ICRs 
+```{r message=FALSE}
+impr_data <- plot_tbl %>% 
+  filter(state1 == "ICR") %>% 
+  distinct(bin, allel, .keep_all = T) %>% 
+  left_join(., i.impr) 
+```
+
+```{r}
+final_all <- readRDS('/g/krebs/kreibich/analysis/SMF/F1/F1_final_all_tbl.rds')
+```
+
+**With wilcoxon test between alleles**
+```{r}
+# COLORS_ALLEL <- c("R+A" = "grey40", "R" = "black", "A" = "grey95")
+COLORS_ALLEL <- c("R+A" = "grey50", "R" = "grey50", "A" = "grey50")
+
+stat_comparison <- list(c("A", "R"))
+plot.allele.violin <- function(plot_tbl, COLORS_ALLEL, PARENTS = FALSE){
+
+  plot_tbl %>% 
+    ggplot(aes(allel, wmean_avMe, fill = allel)) +
+    geom_violin() +
+    geom_boxplot(outlier.alpha = 0, width = 0.2, fill = "white", alpha = 0.9) +
+    stat_compare_means(method = "wilcox.test", size = 4, label.y = 1.02, label = "p.signif", comparisons = stat_comparison) +
+    stat_compare_means(method = "wilcox.test", size = 4, label.y = 0.02, label = "p.format", comparisons = stat_comparison) +
+    scale_fill_manual(values = COLORS_ALLEL) +
+    scale_y_continuous(labels = label_number(scale = 1*100), breaks = c(0, 0.5, 1), expand = c(0.0, 0.08)) +
+    labs(y = "% mean 5mC",
+         x = "allele",
+         fill = "allele")
+}
+
+number_label <- plot_tbl %>% 
+    count(allel) %>% 
+    mutate(labels = paste0(allel, "=", n)) %>% 
+    pull(labels)
+
+pa <- plot_tbl %>% 
+    filter(state1 == "antagonist") %>% 
+    plot.allele.violin(., COLORS_ALLEL) +
+    facet_wrap(~state1~"all") +
+    labs(caption = paste(number_label, collapse = " | ")) +
+    theme_EK() +
+    theme(legend.position = "none", 
+          axis.title.x = element_blank())
+
+  
+number_label <- impr_data %>% 
+    distinct(bin, allel, .keep_all = T) %>% 
+    count(methylation, allel) %>% 
+    mutate(labels = paste0(methylation, "=", n)) %>% 
+    pull(labels) %>% 
+    unique()
+
+pi <- impr_data %>%
+  distinct(bin, allel, .keep_all = T) %>% 
+  dplyr::mutate(methylation = factor(methylation, levels = c("M", "P"), label = c("maternal", "paternal"))) %>%
+  plot.allele.violin(COLORS_ALLEL) +
+  facet_wrap(~state1~methylation) +
+  labs(caption = paste(number_label, collapse = " | ")) +
+  theme_EK() + 
+  theme(
+        legend.position = "none", 
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank())
+
+pa
+pi
+
+ # ggsave(plot = p_final, filename = paste0(WD, OUTDIR, 'F1_violin_plot_mean_5mC_', DATE,'.png'), height = 5, width = 10, dpi = 320)
+ggsave(plot = pa, filename = paste0(WD, OUTDIR, 'F1_violin_plot_mean_5mC_antagonist_', DATE,'.pdf'), height = 5, width = 5, dpi = 320)
+ggsave(plot = pi, filename = paste0(WD, OUTDIR, 'F1_violin_plot_mean_5mC_ICR_', DATE,'.pdf'), height = 5, width = 5, dpi = 320)
+
+```

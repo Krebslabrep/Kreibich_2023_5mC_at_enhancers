@@ -1,0 +1,331 @@
+---
+title: "Chromatin accessibility vs 5mC analysis - Making of final CMH data table - DNMT/TET TKO cell lines"
+author: "Elisa Kreibich"
+date: "23/03/2022"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+  # html_document:
+  #   toc: true
+  #   toc_float: true
+  #   code_folding: hide
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+This script calculates coverage and methylation states for the center CpGs (NWCGW) and all GpCs (DGCHN) in a bin surrounding the center CpG (a 101 bp window was used in Kreibich et al., 2023). 
+Those tibbles will later be joined to the tibble of the WT cell line to calculate the changes. Therefore, no specific filters have to be applied for the TKO data sets and no additional annotations need to be added.    
+The words CpG/NWCGW and GpC/DGCHN are used interchangeably in this script.  
+
+\
+
+### Input
+**Files needed to run this script and which scripts to run to create those:**  
+| Input file name | Information | Script to create |
+|:----------------|:------------|:-----------------|
+| Coverage_matrix_*SAMPLE*_*.rds | Tibble with CpG coverage per bin & fraction & meth state | Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r; Single_molecule_methylation_analysis_CG_GC_WG_MM_CGcentered_EK2022.r |
+| GpC_Coverage_matrix_*SAMPLE*_*.rds | Tibble with GpC coverage per bin & fraction & meth state | Single_molecule_methylation_call_CG_GC_WG_MM_CGcentered_EK2022.r; Single_molecule_methylation_analysis_CG_GC_WG_MM_CGcentered_EK2022.r |
+
+\
+
+### Output
+**Create final data tibbles:**  
+
+* Final coverage and methylation tibble - with fraction information  
+* Final coverage and methylation tibble - withOUT fraction information  
+
+In the tibbles with fraction information, the bins and the non-fraction information are **duplicated**, since every bin has two fraction!  
+The tibbles withOUT fraction information don't contain the fraction columns and the remaining bin information are **unique**. 
+
+\
+
+### Tibble information
+**The final tibbles contain the following columns/ information:** (not all tibbles contain all columns)  
+
+ * bin = bin number 
+ * fraction = CA fraction [0|1 = inaccessible|accessible]  
+ * *SAMPLE*_mean_cov_bin = mean coverage per bin (of center CpG)  
+ * *SAMPLE*_wmean_me_bin = weighted mean 5mC per bin  
+ * *SAMPLE*_wmean_me_fraction = weighted mean 5mC per bin fraction    
+ * *SAMPLE*_mean_cov_fraction = mean coverage per bin fraction    
+ * *SAMPLE*_ratio_mean_cov_fraction = mean coverage ratio of bin fraction  
+ * *SAMPLE*_mean_acc_cov_bin = mean coverage per bin (of all GpCs)  
+ * *SAMPLE*_wmean_acc_bin = weighted mean chromatin accessibility (CA) per bin  
+ * *SAMPLE*_wmean_acc_fraction = weighted mean CA per bin fraction  
+ * *SAMPLE*_mean_acc_cov_fraction = mean GpC coverage per bin fraction. 
+ * *SAMPLE*_ratio_mean_acc_cov_fraction = mean GpC coverage ratio of bin fraction  
+
+In the tibbles with fraction information, the bins and the non-fraction information are **duplicated**, since every bin has two fraction!  
+The tibbles withOUT fraction information don't contain the fraction columns and the remaining bin information are **unique**. 
+
+\
+
+### Additional information on this version:  
+
+* 101 bp collection window around CpG  
+* 10x coverage cutoff per bin for NWCGW and DGCHN methylation  
+* bin most be covered by at least 2 replicates  
+* average methylation (\*\_wmean_me\_\*) == weighted mean (wmean) of all replicates  
+* average accessibility (\*\_wmean_acc\_\*) == mean of GpC methylation in bin + weighted mean (wmean) of all replicates  
+
+\
+
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_CA.R'))
+```
+
+### Set arguments
+```{r arguments}
+OUTDIR          <- 'data_results/'
+INDIR_rds       <- 'data/'
+INDIR           <- 'data_results/single_molecule_call/'
+DATE            <- Sys.Date()
+
+SAMPLENAMES_2   <- c("SMF_MM_TKO_DE_R1a2", "SMF_MM_TKO_DE_R3a4", "SMF_MM_TKO_DE_R5a6")
+SAMPLENAMES_3   <- c("SMF_MM_TETTKO_NO_R1", "SMF_MM_TETTKO_NO_R2")
+
+#Sample of interest for this script
+SOI             <- SAMPLENAMES_2
+SOI_REPS        <- str_extract(SOI[-1], pattern = "R.{1,3}")
+
+#Final file names
+FINAL_TBL_NAME  <- paste('Final_data_tibble_CA', DATE, 
+                         SOI[1], paste(SOI_REPS, collapse = '_'), 
+                         paste0("cObin", cO_bin), 
+                         sep = '_')
+
+#Input data tibbles - all created with the script 'Single_molecule_methylation_analysis_CG_GC_WG_MM_CGcentered_EK2022.r'
+INPUT_NWCGW     <- paste0(WD, INDIR, 'Coverage_matrix_', 
+                          SOI[1], '_', paste(SOI_REPS, collapse = '_'), 
+                          '_', wind_size, 'bp.rds')
+INPUT_DGCHN     <- paste0(WD, INDIR, 'GpC_Coverage_matrix_', 
+                          SOI[1], '_', paste(SOI_REPS, collapse = '_'), 
+                          '_', wind_size, 'bp.rds')
+```
+
+### Load in data
+No additional data needed. 
+
+## Perform coverage and methylation calculation
+### NWCGW coverage and methylation
+```{r}
+  #Read in CpG coverage tibble
+  x1 <- readRDS(INPUT_NWCGW) 
+
+  #No filter for bins!
+  x1.1 <- x1
+  
+  #Add "methylated state" (value = 1) with 0 reads for bin fractions where all reads are in "unmethylated states" (value = 0)
+  x1.2 <- x1.1 %>%
+    add_count(sample, bin, fraction, name = "state_count") %>%
+    filter(state_count == 1, value == 0) %>%
+    select(1:3) %>%
+    mutate(value = 1, n = 0)
+
+  x1.3 <- x1.1 %>%
+    full_join(., x1.2)
+  
+  x2 <- x1.3 %>%
+    dplyr::rename(cov_value = n)
+  
+  #Count reads per fraction
+  x3 <- x2 %>% 
+    add_count(sample, bin, fraction, wt = cov_value, name = "cov_fraction")
+  
+  #Count reads per bin
+  x4 <- x3 %>% 
+    add_count(sample, bin, wt = cov_value, name = "cov_bin")
+  
+  #Calculate methylation per fraction
+  x5 <- x4 %>% 
+    filter(value == 1) %>% 
+    mutate(me_fraction = cov_value/cov_fraction) %>% 
+    group_by(sample, bin) %>% 
+    mutate(me_bin = sum(cov_value)/cov_bin) %>% 
+    ungroup() %>% 
+    select(-c(value, cov_value)) %>% 
+    distinct(sample, bin, fraction, .keep_all = TRUE)
+  
+  #Keep only bin that are covered by at least two replicates
+  x5.1 <- x5 %>% 
+    distinct(sample, bin) %>% 
+    count(bin) %>% 
+    filter(n > 1) %>% 
+    pull(bin)
+  
+  x6 <- x5 %>% 
+    filter(bin %in% x5.1)
+  
+  #Filter by bin coverage cutoff of 10 for each replicate & Separate sample & replicate
+   x6.1 <- x6 %>% 
+    filter(cov_bin >= cO_bin) %>% 
+    mutate(replicate = str_extract(sample, "R.{1,3}"),
+           sample = str_extract(sample, "(?<=SMF_MM_)\\w{1,}(?=_R.{1,})"))
+  
+  #REPLICATE INFO: Calculate weighted mean of methylation & mean of coverage
+    x6.2 <- x6.1 %>% 
+      distinct(bin, replicate, .keep_all = TRUE) %>% 
+      group_by(bin) %>% 
+      mutate(mean_cov_bin = mean(cov_bin, na.rm = T),
+             wmean_me_bin = weighted.mean(me_bin, cov_bin, na.rm = T)) %>% 
+      ungroup() %>% 
+      select(contains("bin"), contains("ratio"))
+    
+    x7 <- x6.1 %>%
+      left_join(., x6.2) %>% 
+      group_by(bin, fraction) %>% 
+      mutate(wmean_me_fraction = weighted.mean(me_fraction, cov_fraction, na.rm = T),
+             mean_cov_fraction = mean(cov_fraction, na.rm = T),
+             ratio_mean_cov_fraction = mean_cov_fraction/mean_cov_bin) %>% 
+      ungroup() %>% 
+      select(-c(starts_with("cov"), starts_with("me_"), replicate)) %>% 
+      distinct(bin, fraction, .keep_all = T) 
+
+  
+  #Add sample name to column names
+  x8 <- x7 %>% 
+    pivot_wider(names_from = "sample", values_from = contains("mean"), names_glue = "{sample}_{.value}")
+  
+  #Filter for bin coverage
+  var <- names(x8)[grepl("mean_cov_bin", names(x8))]
+  x9 <- x8 %>% 
+    filter(get(var) >= cO_bin) %>% 
+    mutate(fraction = str_extract(fraction, "[0|1]$")) %>% 
+    arrange(bin, fraction) 
+```
+
+
+### DGCHN coverage and methylation
+```{r}
+  #Read in GpC coverage tibble
+  y1 <- readRDS(INPUT_DGCHN)
+  
+  #No filter for bins!
+  y1.1 <- y1
+  
+  #Add "methylated state" (value = 1) with 0 reads for bin fractions where all reads are in "unmethylated states" (value = 0)
+  y1.2 <- y1.1 %>%
+    add_count(sample, bin, fraction, name = "state_count") %>%
+    filter(state_count == 1, value == 0) %>%
+    select(1:3) %>%
+    mutate(value = 1, n = 0)
+
+  y1.3 <- y1.1 %>%
+    full_join(., y1.2)
+  
+  #Count reads per fraction per state (me/unme) 
+  y2 <- y1.3 %>%
+    dplyr::rename(cov_value = n)
+  
+  #Count reads per fraction
+  y3 <- y2 %>% 
+    add_count(sample, bin, fraction, wt = cov_value, name = "cov_fraction")
+  
+  #Count reads per bin
+  y4 <- y3 %>% 
+    add_count(sample, bin, wt = cov_value, name = "cov_bin")
+  
+  #Calculate methylation per fraction
+  y5 <- y4 %>% 
+    group_by(sample, bin, fraction) %>% 
+    mutate(acc_fraction = weighted.mean(value, w = cov_value)) %>%
+    ungroup() %>% 
+    group_by(sample, bin) %>% 
+    mutate(acc_bin = weighted.mean(value, w = cov_value)) %>% 
+    ungroup() %>% 
+    select(-c(value, cov_value)) %>% 
+    distinct(sample, bin, fraction, .keep_all = TRUE)
+  
+  #Keep only bin that are covered by at least two replicates
+  y5.1 <- y5 %>% 
+    distinct(sample, bin) %>% 
+    count(bin) %>% 
+    filter(n > 1) %>% 
+    pull(bin)
+  
+  y6 <- y5 %>% 
+    filter(bin %in% y5.1)
+  
+  #Filter by bin coverage cutoff of 10 for each replicate & Separate sample & replicate
+   y6.1 <- y6 %>% 
+    filter(cov_bin >= cO_bin) %>% 
+    mutate(replicate = str_extract(sample, "R.{1,3}"),
+           sample = str_extract(sample, "(?<=SMF_MM_)\\w{1,}(?=_R.{1,})"))
+ 
+  #REPLICATE INFO: Calculate weighted mean of methylation & mean of coverage
+    y6.2 <- y6.1 %>% 
+      distinct(bin, replicate, .keep_all = TRUE) %>% 
+      group_by(bin) %>% 
+      mutate(mean_acc_cov_bin = mean(cov_bin, na.rm = T),
+             wmean_acc_bin = weighted.mean(acc_bin, cov_bin, na.rm = T)) %>% 
+      ungroup() %>% 
+      select(contains("bin"), contains("ratio"))
+    
+    y7 <- y6.1 %>% 
+      left_join(., y6.2) %>% 
+      group_by(bin, fraction) %>% 
+      mutate(wmean_acc_fraction = weighted.mean(acc_fraction, cov_fraction, na.rm = T),
+             mean_acc_cov_fraction = mean(cov_fraction, na.rm = T),
+             ratio_mean_acc_cov_fraction = mean_acc_cov_fraction/mean_acc_cov_bin) %>% 
+      ungroup() %>% 
+      select(-c(starts_with("cov"), starts_with("acc_"), replicate)) %>% 
+      distinct(bin, fraction, .keep_all = T) 
+
+  
+  #Add sample name to column names
+  y8 <- y7 %>% 
+    pivot_wider(names_from = "sample", values_from = contains("mean"), names_glue = "{sample}_{.value}")
+```
+
+
+### Combine tibbles
+```{r}
+#Combined unfiltered coverage & methylation tibble
+all_unfiltered <- x9 %>% 
+  left_join(., y8)
+
+  ##Sanity check
+    nrow(all_unfiltered) #815137
+    var <- names(all_unfiltered)[grepl("mean_acc_cov_bin", names(all_unfiltered))]
+    all_unfiltered %>% select(bin, contains("mean_acc_cov_bin")) %>% 
+      filter(is.na(get(var))) %>% pull(bin) %>% unique() %>% length() #0
+
+
+#Nothing is added
+all1 <- all_unfiltered 
+
+FINAL_FILENAME <- paste0(WD, OUTDIR, FINAL_TBL_NAME, '_full_fractions.rds')
+saveRDS(all1, FINAL_FILENAME)
+message(FINAL_FILENAME, ' saved.')
+
+#Remove fraction (0|1 = inaccessible|accessible) information
+all2 <- all1 %>% 
+  select(-contains("fraction")) %>% 
+  distinct(bin, .keep_all = TRUE)
+
+FINAL_FILENAME <- paste0(WD, OUTDIR, FINAL_TBL_NAME, '.rds')
+saveRDS(all2, FINAL_FILENAME)
+message(FINAL_FILENAME, ' saved.')
+```

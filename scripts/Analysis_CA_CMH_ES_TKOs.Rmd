@@ -1,0 +1,765 @@
+---
+title: "Chromatin accessibility vs 5mC analysis - using Cochran-Mantel-Haenszel test"
+author: "Elisa Kreibich"
+date: "23/03/2022"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+# editor_options:
+#   chunk_output_type: inline
+  # html_document:
+  #   toc: true
+  #   toc_float: true
+  #   code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+Analysis of SMF WT ES data to identify antagonist and neutral sites, define them and analyse their behavior in DNMT and TET TKOs.  
+
+### Input
+**Files needed to run this script and which scripts to run to create those:**
+
+| Input file name | Information | Script to create |
+|:----------------|:------------|:-----------------|
+| Final_data_tibble_CA_***DATE*** _ES_NO_TKO_DE_TETTKO_NO_cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF***_states.rds  | Final tibble with states and calculated changes | Make_Final_CG_CMH_data_tibbles_ES_plus_TKOs.Rmd  |  
+
+\
+
+### Output
+Plots of the following analyses:  
+
+* Quick checks on coverage, 5mC distribution etc in WT and TKOs
+* Changes in accessibility in DNMT TKOs
+* Changes in accessibility in TET TKOs 
+
+\
+
+### State definitions
+**States are defined as followed:**  
+
+* **state** 
+    * antagonist: COR <= 0.5 | pvalue < 0.05 | ICR == FALSE 
+    * neutral: COR > 0.5 | no pvalue cutoff | ICR == FALSE 
+    * agonist: COR >= 2 | pvalue < 0.05 | ICR == FALSE
+    * ICR: ICR == TRUE
+
+* **state2**
+    * antagonist: COR <= 0.5 | pvalue < 0.05 | ICR == FALSE  
+    * neutral+: COR > 0.9 & < 1.1 | no pvalue cutoff | ICR == FALSE 
+    * neutral: COR > 0.5 | no pvalue cutoff | ICR == FALSE 
+    * agonist: COR >= 2 | pvalue < 0.05 | ICR == FALSE
+    * ICR: ICR == TRUE
+
+* **state0**
+    * antagonist: COR <= 0.5 | pvalue < 0.05
+    * neutral: COR > 0.5 | no pvalue cutoff  
+    * agonist: COR >= 2 | pvalue < 0.05 
+
+\
+
+### Additional information on this version:  
+
+* 101 bp collection window around CpG  
+* 10x coverage cutoff per bin for NWCGW and DGCHN methylation  
+* 30x coverage cutoff for SM analysis 
+* bins most be covered by at least 2 replicates  
+* average methylation (\*\_wmean_me\_\*) == weighted mean (wmean) of all replicates  
+* average accessibility (\*\_wmean_acc\_\*) == mean of GpC methylation in bin + weighted mean (wmean) of all replicates  
+
+\
+
+# Data Analysis
+## Set environment
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r load libraries, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(patchwork))
+
+source(paste0(WD, 'scripts/utilities/COLORS.R'))
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_CA.R'))
+```
+
+### Set arguments
+```{r arguments}
+INDIR           <- 'data_results/'
+OUTDIR          <- 'data_results/'
+dir.create(OUTDIR)
+
+DATE            <- Sys.Date()
+
+#Arguments for WT input data set
+# SOI           <- c("SMF_MM_ES_NO_R1", "SMF_MM_ES_NO_R2", "SMF_MM_ES_NO_R5a6")
+# SOI_REPS      <- str_extract(SOI[-1], pattern = "R.{1,3}")
+# INPUT_DATE_WT <- c("2022-10-27")  #Date of Final WT tibble creation
+
+#Arguments for Final WT+TKOs input data set
+SAMPLE_OI       <- "ES"
+SAMPLE_OI_full  <- c("ES_NO", "TKO_DE", "TETTKO_NO")
+SAMPLES_OI_2    <- c("ES WT", "DNMT TKO", "TET TKO")
+INPUT_DATE      <- c("2022-10-24")  #Date of Final WT+TKO tibble creation
+
+```
+
+### Load data
+#### Final data tibble WT and TKOs
+```{r}
+files   <- list.files(path = paste0(WD, INDIR),
+                    pattern =  paste('Final_data_tibble_CA', INPUT_DATE, 
+                         ".{1,}",
+                         paste0("cObin", cO_bin),
+                         paste0("cOCMH", cO_CMH),
+                         ".{1,}.rds",
+                         sep = '_'),
+                    full.names = TRUE)
+files   <- files[grepl(paste(SAMPLE_OI_full, collapse = "_"), files)]
+data    <- readRDS(files[grepl("_states.rds", files)])
+# data_gr  <- readRDS(files[grepl("_states_gr.rds", files)])
+```
+**Tibble mutations - with states**
+```{r}
+# Filter out high and low methylated regions
+data <- data %>%
+  filter(!(grepl("_5mC", state)))
+
+# Filter out Inactive and CTCF annotations to focus on active regulatory regions
+data_f <- data %>%
+  filter(!(chromHMMcl %in% c("C1_CTCF", "C2_Inactive")))
+```
+
+\
+
+## #1 Quick check - WT + TKOs
+### Coverage at bins - all cell lines
+```{r message=FALSE, warning=FALSE}
+vars1 <- names(data)[grepl("mean_cov", names(data))]
+vars1_n <- str_remove(vars1[1], "^\\w{1,}_(NO|DE)_")
+
+p_u <- data %>% 
+  select(bin, vars1) %>% 
+  pivot_longer(cols = -bin,
+               names_to = "cell_line",
+               values_to = vars1_n) %>% 
+  mutate(cell_line = str_remove(cell_line, paste0("_", vars1_n))) %>% 
+  mutate(cell_line = case_when(
+    cell_line == "ES_NO" ~ SAMPLES_OI_2[1],
+    cell_line == "TKO_DE" ~ SAMPLES_OI_2[2],
+    cell_line == "TKO_NO" ~ SAMPLES_OI_2[2],
+    cell_line == "TETTKO_NO" ~ SAMPLES_OI_2[3]
+  )) %>% 
+  mutate(cell_line = factor(cell_line, levels = SAMPLES_OI_2)) %>% 
+  ggplot(aes(cell_line, get(vars1_n), fill = cell_line)) +
+  geom_violin() +
+  geom_boxplot(fill = "white",  width = .1, alpha = 0.8, outlier.shape = NA, coef = 0) +
+  scale_y_log10() +
+  scale_fill_manual(values = COLORS_TYPES) +
+  theme_EK() +
+  labs(y = vars1_n,
+       subtitle = "Final data")
+p_u
+
+```
+
+\
+
+## #2 Analysis - WT & TKOs - Global 5mC Pertubations
+Here I will do only the analyses for the agonist and neutral sites and will remove the agonist sites. 
+The agonist sites are analysed in a separate script.
+
+```{r}
+data_f2 <- data_f %>% 
+  filter(state != "agonist")
+```
+
+**Functions**
+```{r}
+ggplot.acc <- function(tbl = data_f2, CL1, CL2, CO_5mC, filter2){
+  var1 <- c(
+            names(tbl)[grepl("acc_cov_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))],
+            names(tbl)[grepl("wmean_acc_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))],
+            names(tbl)[grepl("wmean_me_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))]
+            )
+  var2 <- c(
+            names(tbl)[grepl("acc_cov_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))],
+            names(tbl)[grepl("wmean_acc_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))],
+            names(tbl)[grepl("wmean_me_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))]
+            )   
+  
+  data_tbl <- if(CL2 == "TKO"){
+    tbl %>% 
+      mutate(NWCGW_change = get(var1[3]))
+  } else if(CL2 == "TETTKO"){
+     tbl %>% 
+      mutate(NWCGW_change = get(var2[3]) - get(var1[3]))
+  } 
+  data_tbl <- data_tbl %>% 
+    filter(NWCGW_change >= CO_5mC) %>% 
+    filter(state2 != "neutral") %>%
+    filter(state2 != filter2)
+  
+  count <- data_tbl %>% 
+    count(state2) %>% 
+    mutate(label = paste0(state2, " (", n, ")")) %>% 
+    pull(label)
+  
+  data_tbl %>% 
+    ggplot(aes(x = state2, y = -(get(var2[2]) - get(var1[2]))*100, fill = state2)) +
+    geom_violin() +
+    geom_boxplot(fill = "white", color = "black", width = 0.2, alpha = 0.8, outlier.alpha = 0, coef = 0) +
+    stat_compare_means(label = "p.signif", size = 3, ref.group = "neutral+") +
+    stat_compare_means(ref.group = "neutral+", label.y = -Inf) +
+    scale_fill_manual(values = COLORS_STATE_v3s) +
+    scale_color_gradient(low = "grey75", high = "grey5") +
+    labs(subtitle = paste("SMF (1-accessibility) change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1-accessibility) (", CL2," - ", CL1, ") [%]"),
+         x = "",
+         caption = paste(count, collapse = "; ")) +
+    theme_EK()
+}
+```
+
+### TKO 
+#### Global change in accessibility
+```{r}
+CL1       <- "ES"     #cell line ref
+CL2       <- "TKO"    #cell line 2
+CO_5mC    <- 0.3      #cutoff 5mC difference --> at least 30% methylation difference
+TITLE     <- paste("delta accessibility", CL1, "vs", CL2)
+
+filter2   <- ""   #filter out additional state 
+pVio_TKO2 <- ggplot.acc(data, CL1, CL2, CO_5mC, filter2) + 
+  ylim(-40,20) + 
+  scale_fill_manual(values = COLORS_STATE_v3s[-1]) +
+  ggtitle("no filters")
+pVio_TKO2
+# ggsave(plot = pVio_TKO2, filename = paste0(WD, OUTDIR, paste("AccChange", "TKO", "NOTfiltered", "wICR", "wAgonist", sep="_"), "_v2_", DATE, ".pdf"), width = 4.5, height = 5)
+
+filter2   <- ""   #filter out additional state 
+pVio_TKO1 <- ggplot.acc(data_f, CL1, CL2, CO_5mC, filter2) + 
+  ylim(-40,20) + 
+  scale_fill_manual(values = COLORS_STATE_v3s[-1]) +
+  ggtitle("filtered for chromHMM")
+pVio_TKO1
+ggsave(plot = pVio_TKO1, filename = paste0(WD, OUTDIR, paste("AccChange", "TKO", "filtered_chromHMM", "wICR", "wAgonist", sep="_"), "_v", DATE, ".pdf"), width = 4.5, height = 5)
+
+filter2   <- "agonist"   #filter out additional state 
+pVio_TKO3 <- ggplot.acc(data_f2, CL1, CL2, CO_5mC, filter2) + 
+  ylim(-40,20) + 
+  scale_fill_manual(values = COLORS_STATE_v3s[-c(1,5)]) +
+  ggtitle("filtered for chromHMM")
+pVio_TKO3
+ggsave(plot = pVio_TKO3, filename = paste0(WD, OUTDIR, paste("AccChange", "TKO", "filtered_chromHMM", "wICR", sep="_"), "_v2_", DATE, ".pdf"), width = 4.5, height = 5)
+
+```
+
+\
+
+##### PValues of statistical test
+```{r}
+CL1       <- "ES"     #cell line ref
+CL2       <- "TKO"    #cell line 2
+CO_5mC    <- 0.3      #cutoff 5mC difference
+
+df <- data_f %>% 
+  mutate(NWCGW_change = ES_NO_wmean_me_bin,
+         DGCHN_change = -(TKO_DE_wmean_acc_bin - ES_NO_wmean_acc_bin)) %>%
+  filter(NWCGW_change >= CO_5mC) %>% 
+  filter(state2 != "neutral")
+
+compare_means(DGCHN_change ~ state2, df, method = "wilcox.test", ref.group = "neutral+")
+# compare_means(DGCHN_change ~ state2, df, method = "t.test", ref.group = "neutral+")
+```
+
+\
+
+#### Correlation change 5mC and accessibility
+**Set-up data**
+```{r fig.height=4, fig.width=12}
+CL1     <- "ES"     #cell line ref
+CL2     <- "TKO" #cell line 2
+CO_5mC  <- 0.3   #cutoff 5mC difference
+covCO   <- 10     #cutoff coverage
+
+tbl <- data_f
+  var1 <- c(
+            names(tbl)[grepl("acc_cov_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))],
+            names(tbl)[grepl("wmean_acc_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))],
+            names(tbl)[grepl("wmean_me_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))]
+            )
+  var2 <- c(
+            names(tbl)[grepl("acc_cov_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))],
+            names(tbl)[grepl("wmean_acc_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))],
+            names(tbl)[grepl("wmean_me_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))]
+            )   
+  
+  data_tbl <- if(CL2 == "TKO"){
+    tbl %>% 
+      mutate(NWCGW_change = get(var1[3]))
+  } else if(CL2 == "TETTKO"){
+     tbl %>% 
+      mutate(NWCGW_change = get(var2[3]) - get(var1[3]))
+  } 
+```
+
+\
+
+**Correlation score**
+```{r}
+data_tbl2 <- data_tbl %>% 
+  filter(state2 != "neutral") %>%
+  filter(state2 != "ICR") %>%
+  filter(NWCGW_change >= 0) %>% 
+  mutate(accCh = -(get(var2[2]) - get(var1[2])),
+         log2FC = -(log2((get(var2[2])+0.001)/(get(var1[2])+0.001))))
+
+cor_val <- data_tbl2 %>% 
+  select(bin, state2, accCh, log2FC, NWCGW_change) %>% 
+  distinct(bin, .keep_all = T) %>% 
+  pivot_wider(names_from = "state2", values_from = c("accCh", "log2FC", "NWCGW_change"), names_sep = "_") %>% 
+  select(-bin) %>% 
+  corrr::correlate()
+```
+
+\
+
+**Delta accessibility**
+```{r}
+# Both states
+numbers <- data_tbl2 %>% 
+  count(state2) %>% 
+  mutate(label = paste(state2, "=", n)) 
+  
+
+p_AccCh <- data_tbl2 %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.6, size = 2, show.legend = T) +
+    geom_smooth(color = "black", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3s[c(2,3,5)]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("SMF (1 - accessibility) change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1 - CA) (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL2," - ", CL1, ") [%]"),
+         caption = paste("R neutral =", round(cor_val$`accCh_neutral+`[7],3),
+                         "\nR antagonist =", round(cor_val$`accCh_antagonist`[8],3),
+                         "\nR agonist =", round(cor_val$`accCh_agonist`[9],3),
+                         "\n", paste(numbers$label, collapse = " | "))) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 3) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", sep="_")
+ADD = "_v1_"
+# ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 8)
+# ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 8)
+```
+```{r}
+# Only antagonist
+numbers <- data_tbl2 %>% 
+  filter(state2 == "antagonist") %>% 
+  nrow()
+  
+p_AccCh <- data_tbl2 %>% 
+    filter(state2 == "antagonist") %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = T) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v2[2:3]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1-CA) (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL1," - ", CL2, ") [%]"),
+         caption = paste("R antagonist =", round(cor_val$`accCh_antagonist`[8],3), "| n =", numbers)) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", "antagonist", sep="_")
+ADD = "_v1_"
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 6.5)
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 6.5)
+```
+```{r}
+# Only agonist
+numbers <- data_tbl2 %>% 
+  filter(state2 == "agonist") %>% 
+  nrow()
+  
+p_AccCh <- data_tbl2 %>% 
+    filter(state2 == "agonist") %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = T) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3[5]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("delta accessibility (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL1," - ", CL2, ") [%]"),
+         caption = paste("R agonist =", round(cor_val$`accCh_agonist`[9],3), "| n =", numbers)) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", "agonist", sep="_")
+ADD = "_v1_"
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 6.5)
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 6.5)
+```
+```{r}
+# Only neutral+
+numbers <- data_tbl2 %>% 
+  filter(state2 == "neutral+") %>% 
+  nrow()
+  
+p_AccCh <- data_tbl2 %>% 
+    filter(state2 == "neutral+") %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = T) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3[2:3]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1-CA) (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL1," - ", CL2, ") [%]"),
+         caption = paste("R neutral =", round(cor_val$`accCh_neutral+`[7],3), "| n =", numbers)) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", "neutral", sep="_")
+ADD = "_v1_"
+# ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 6.5)
+# ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 6.5)
+```
+
+\
+
+**log2(FC) accessibility**
+```{r}
+p_AccCh <- data_tbl2 %>% 
+    ggplot(aes(x = NWCGW_change*100, y = log2FC, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = F) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3[2:5]) + 
+    # scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("log2 (fold change in accessibility) (", CL2," - ", CL1, ")"),
+         x = paste0("delta 5mC (", CL2," - ", CL1, ") [%]"),
+         caption = paste("R neutral =", round(cor_val$`log2FC_neutral+`[7],3),
+                         "\nR antagonist =", round(cor_val$log2FC_antagonist[8],3),
+                         "\nR agonist =", round(cor_val$log2FC_agonist[9],3))) +
+    theme_EK() +
+    # theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+```
+
+\
+
+##### Linear model
+```{r}
+df_A <- data_f2 %>% 
+  mutate(NWCGW_change = ES_NO_wmean_me_bin,
+         DGCHN_change = -(TKO_DE_wmean_acc_bin - ES_NO_wmean_acc_bin)) %>%
+  filter(state2 == "antagonist")
+
+TKO_A.lm <- lm(DGCHN_change ~ NWCGW_change, data = df_A)
+summary(TKO_A.lm)
+
+df_N <- data_f2 %>% 
+  mutate(NWCGW_change = ES_NO_wmean_me_bin,
+         DGCHN_change = -(TKO_DE_wmean_acc_bin - ES_NO_wmean_acc_bin)) %>%
+  filter(state2 == "neutral+")
+
+TKO_N.lm <- lm(DGCHN_change ~ NWCGW_change, data = df_N)
+summary(TKO_N.lm)
+```
+
+\
+
+### TETTKO
+#### Global change in accessibility
+```{r}
+CL1       <- "ES"         #cell line ref
+CL2       <- "TETTKO"    #cell line 2
+CO_5mC    <- 0.3          #cutoff 5mC difference
+FILENAME  <- paste("AccChange", "TET", sep="_")
+
+
+filter2   <- ""   #filter out additional state 
+ADD       <- paste("NOT_filtered", "wICR", "wAgonist", sep="_")
+pVio_TET5 <- ggplot.acc(data, CL1, CL2, CO_5mC, filter2) + 
+  ylim(-30,40) + 
+  scale_fill_manual(values = COLORS_STATE_v3s[-1]) +
+  ggtitle("no filters")
+pVio_TET5
+# ggsave(plot = pVio_TET5, filename = paste0(WD, OUTDIR, FILENAME, ADD, "_v", DATE, ".pdf"), width = 4.5, height = 5)
+
+
+filter2   <- ""   #filter out additional state 
+ADD       <- paste("filtered_chromHMM", "wICR", "wAgonist", sep="_")
+pVio_TET1 <- ggplot.acc(data_f, CL1, CL2, CO_5mC, filter2) + 
+  ylim(-30,40) + 
+  scale_fill_manual(values = COLORS_STATE_v3s[-1]) +
+  ggtitle("filtered for chromHMM")
+pVio_TET1
+ggsave(plot = pVio_TET1, filename = paste0(WD, OUTDIR, FILENAME, ADD, "_v", DATE, ".pdf"), width = 4.5, height = 5)
+
+filter2   <- ""   #filter out additional state 
+ADD       <- paste("filtered_chromHMM", "wICR", sep="_")
+pVio_TET1 <- ggplot.acc(data_f2, CL1, CL2, CO_5mC, filter2) + 
+  ylim(-30,40) + 
+  scale_fill_manual(values = COLORS_STATE_v1s[-1]) +
+  ggtitle("filtered for chromHMM")
+pVio_TET1
+ggsave(plot = pVio_TET1, filename = paste0(WD, OUTDIR, FILENAME, ADD, "_v", DATE, ".pdf"), width = 4.5, height = 5)
+```
+
+##### PValues of statistical test
+```{r}
+CL1     <- "ES"     #cell line ref
+CL2     <- "TETTKO" #cell line 2
+CO_5mC  <- 0.3      #cutoff 5mC difference
+
+df <- data_f2 %>% 
+  mutate(NWCGW_change = TETTKO_NO_wmean_me_bin - ES_NO_wmean_me_bin,
+         DGCHN_change = 1-(TETTKO_NO_wmean_acc_bin - ES_NO_wmean_acc_bin)) %>%
+  filter(NWCGW_change >= CO_5mC) %>% 
+  filter(state2 != "neutral")
+
+compare_means(DGCHN_change ~ state2, df, method = "wilcox.test", ref.group = "neutral+")
+```
+
+#### Correlation change 5mC and accessibility
+**Set-up data**
+```{r fig.height=4, fig.width=12}
+CL1     <- "ES"     #cell line ref
+CL2     <- "TETTKO" #cell line 2
+CO_5mC  <- 0.3   #cutoff 5mC difference
+
+tbl <- data_f
+  var1 <- c(
+            names(tbl)[grepl("acc_cov_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))],
+            names(tbl)[grepl("wmean_acc_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))],
+            names(tbl)[grepl("wmean_me_bin", names(tbl)) & grepl(paste0("^", CL1), names(tbl))]
+            )
+  var2 <- c(
+            names(tbl)[grepl("acc_cov_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))],
+            names(tbl)[grepl("wmean_acc_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))],
+            names(tbl)[grepl("wmean_me_bin", names(tbl)) & grepl(paste0("^", CL2), names(tbl))]
+            )   
+  
+  data_tbl <- if(CL2 == "TKO"){
+    tbl %>% 
+      mutate(NWCGW_change = get(var1[3]))
+  } else if(CL2 == "TETTKO"){
+     tbl %>% 
+      mutate(NWCGW_change = get(var2[3]) - get(var1[3]))
+  } 
+```
+
+\
+
+**Correlation score**
+```{r}
+data_tbl2 <- data_tbl %>% 
+  filter(state2 != "neutral") %>%
+  filter(state2 != "ICR") %>%
+  filter(NWCGW_change >= 0) %>% 
+  mutate(accCh =  -(get(var2[2]) - get(var1[2])),
+         log2FC = -(log2((get(var2[2])+0.001)/(get(var1[2])+0.001))))
+
+cor_val <- data_tbl2 %>% 
+  select(bin, state2, accCh, log2FC, NWCGW_change) %>% 
+  distinct(bin, .keep_all = T) %>% 
+  pivot_wider(names_from = "state2", values_from = c("accCh", "log2FC", "NWCGW_change"), names_sep = "_") %>% 
+  select(-bin) %>% 
+  corrr::correlate()
+
+cor_val
+```
+
+\
+
+**Delta accessibility**
+```{r}
+# Both states
+numbers <- data_tbl2 %>% 
+  count(state2) %>% 
+  mutate(label = paste(state2, "=", n)) 
+  
+p_AccCh <- data_tbl2 %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = T) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3[2:5]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1- CA) (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL1," - ", CL2, ") [%]"),
+         caption = paste("R neutral =", round(cor_val$`accCh_neutral+`[7],3),
+                         "\nR antagonist =", round(cor_val$`accCh_antagonist`[8],3),
+                         "\nR agonist =", round(cor_val$`accCh_agonist`[9],3),
+                         "\n", paste(numbers$label, collapse = " | "))) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", sep="_")
+ADD = "_v1_"
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 7)
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 7)
+```
+```{r}
+# Only antagonist
+numbers <- data_tbl2 %>% 
+  filter(state2 == "antagonist") %>% 
+  count(state2)
+  
+p_AccCh <- data_tbl2 %>% 
+    filter(state2 == "antagonist") %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = T) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v2[2:3]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1 - CA) (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL1," - ", CL2, ") [%]"),
+         caption = paste("R antagonist =", round(cor_val$`accCh_antagonist`[8],3), "| n = ", numbers$n)) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", "antagonist", sep="_")
+ADD = "_v1_"
+# ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 6.5)
+# ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 6.5)
+```
+```{r}
+# Only agonist
+numbers <- data_tbl2 %>% 
+  filter(state2 == "agonist") %>% 
+  count(state2)
+  
+p_AccCh <- data_tbl2 %>% 
+    filter(state2 == "agonist") %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = T) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3[2:5]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1 - CA) (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL1," - ", CL2, ") [%]"),
+         caption = paste("R agonist =", round(cor_val$`accCh_agonist`[9],3), "| n = ", numbers$n)) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", "agonist", sep="_")
+ADD = "_v1_"
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 6.5)
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 6.5)
+```
+
+```{r}
+# Only neutral
+numbers <- data_tbl2 %>% 
+  filter(state2 == "neutral+") %>% 
+  count(state2)
+  
+p_AccCh <- data_tbl2 %>% 
+    filter(state2 == "neutral+") %>% 
+    ggplot(aes(x = NWCGW_change*100, y = accCh*100, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = T) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3[2:3]) + 
+    scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("delta SMF (1 - CA) (", CL2," - ", CL1, ") [%]"),
+         x = paste0("delta 5mC (", CL1," - ", CL2, ") [%]"),
+         caption = paste("R neutral =", round(cor_val$`accCh_neutral+`[7],3), "| n = ", numbers$n)) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+FILENAME = paste("AccChange", CL2, "lm", "neutral", sep="_")
+ADD = "_v1_"
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".png"), height = 4, width = 6.5)
+ggsave(plot = p_AccCh, paste0(WD, OUTDIR, FILENAME, ADD, DATE, ".pdf"), height = 4, width = 6.5)
+```
+
+\
+
+**log2(FC) accessibility**
+```{r}
+p_AccCh <- data_tbl2 %>% 
+    ggplot(aes(x = NWCGW_change*100, y = log2FC, color = state2)) +
+    geom_hline(color = "black", yintercept = 0, linetype = "dotted") +
+    geom_point(alpha = 0.8, size = 2, show.legend = F) +
+    geom_smooth(color = "grey20", method = "lm") +
+    scale_color_manual(values = COLORS_STATE_v3[2:5]) + 
+    # scale_y_continuous(limits = c(-40, 40)) +
+    labs(subtitle = paste("accessibility change in", CL1, "vs", CL2),
+         y = paste0("log2 (fold change in accessibility) (", CL2," - ", CL1, ")"),
+         x = paste0("delta 5mC (", CL2," - ", CL1, ") [%]"),
+         caption = paste("R neutral =", round(cor_val$`log2FC_neutral+`[7],3),
+                         "\nR antagonist =", round(cor_val$log2FC_antagonist[8],3),
+                         "\nR agonist =", round(cor_val$log2FC_agonist[9],3))) +
+    theme_EK() +
+    facet_wrap(~state2, ncol = 2) 
+p_AccCh
+
+```
+
+\
+
+##### Linear model
+```{r}
+df_A <- data_f2 %>% 
+  mutate(NWCGW_change = TETTKO_NO_wmean_me_bin - ES_NO_wmean_me_bin,
+         DGCHN_change = -(TETTKO_NO_wmean_acc_bin - ES_NO_wmean_acc_bin)) %>%
+  filter(state2 == "antagonist")
+
+TETTKO_A.lm <- lm(DGCHN_change ~ NWCGW_change, data = df_A)
+summary(TETTKO_A.lm)
+
+df_N <- data_f2 %>% 
+  mutate(NWCGW_change = TETTKO_NO_wmean_me_bin - ES_NO_wmean_me_bin,
+         DGCHN_change = -(TETTKO_NO_wmean_acc_bin - ES_NO_wmean_acc_bin)) %>%
+  filter(state2 == "neutral+")
+
+TETTKO_N.lm <- lm(DGCHN_change ~ NWCGW_change, data = df_N)
+summary(TETTKO_N.lm)
+```

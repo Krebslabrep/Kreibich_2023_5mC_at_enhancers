@@ -1,0 +1,308 @@
+---
+title: "TF centric analysis - final data table - C2C12 | MEL | NP"
+author: "Elisa Kreibich"
+date: "13/04/2022"
+update1:
+update2:
+output: 
+  html_notebook:
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+This script calculates coverage and methylation states for the CpG (NWCGW) and all GpC (DGCHN) in the three bins at a TFBS. Then it combines this with the additional information (chromHMM, ICR, Cochran-Mantel-Haenszel test results) and calls the states to identify antagonist and neutral sites.  
+The words CpG/NWCGW and GpC/DGCHN are used interchangeably in this script.  
+
+\
+
+### State definitions
+**States are defined as followed:**  
+
+* **antagonist:** mean_me_TFBS > 0.1 < 0.8 | COR <= 0.5 | pval < 0.05 [| ICR == FALSE]  
+* **neutral:** mean_me_TFBS > 0.1 < 0.8 | COR > 0.5 < 2 [| ICR == FALSE]  
+* **neutral+:** mean_me_TFBS > 0.1 < 0.8 | COR > 0.9 < 1.1 | ICR == FALSE  
+* **agonist:** mean_me_TFBS > 0.1 < 0.8 | COR >= 2 | pval < 0.05 [| ICR == FALSE]  
+* **ICR:** mean_me_TFBS > 0.1 < 0.8 | ICR == TRUE  
+* **fully methylated:** mean_me_TFBS > 0.8
+* **unmethylated:** mean_me_TFBS < 0.1
+
+\
+
+### Additional Information on this version:  
+
+* 10x coverage cutoff per bin for NWCGW and DGCHN methylation  
+* 30x coverage cutoff for SM analysis  
+* bin must be covered by at least 2 replicates  
+
+
+* FINAL data table contains:  
+  * **TFBS** - TFBS number
+  * **motif** - motif name  
+  * **motif_ID** - motif ID from motif clustering  
+  * **representative.motif** - representative motif name of motif cluster  
+  * **state** - neutral/antagonist (neutral == everything that is NOT antagonist)  
+  * **state2**  - neutral/neutral+/antagonist/agonist (neutral+ == only TFBS around 0 of -log(COR) == conservative neutrals)  
+  * **state_2_crude**  - COR > 0.5 (neutral)/ COR < 0.5 (antagonist) (crude criteria)  
+  * **COR**, **pval** - statistics from Cochran-Mantel-Haenszel (CMH) test (COR = common odds ratio) 
+  * **fraction** - closed/bound/accessible  
+  * **mean_cov_TFBS** - replicates mean of TFBS coverage  
+  * **wmean_me_TFBS** - replicates weighted mean of TFBS average 5mC  
+  * **wmean_me_fraction** - replicates weighted mean of fractions average 5mC  
+  * **mean_cov_fraction** - replicates mean of fraction coverage  
+  * **ratio_mean_cov_fraction** - ratio of fractions from replicates mean  
+  * **seqnames**, **start**, **end**, **width**, **strand** - genomic location of TFBS  
+
+\
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r load libraries, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_TFBS.R'))
+```
+
+### Set arguments
+```{r arguments}
+INDIR           <- 'data_results/single_molecule_call'
+INDIR_rds       <- 'data/'
+OUTDIR          <- 'data_results/'
+DATE            <- Sys.Date()
+
+SAMPLENAMES     <- c("C2C12_NO", "MEL_NO", "NP_NO")
+SAMPLEREPS      <- list(c("R1", "R2"), c("R1", "R2"),  c("R1", "R2"))
+SAMPLES_l       <- lapply(seq_along(SAMPLENAMES), function(x){paste("SMF_MM", SAMPLENAMES[[x]], SAMPLEREPS[[x]], sep = "_")})
+SAMPLE_OI       <- 3
+
+FINAL_TBL_NAME <- paste('Final_data_tibble_TF', DATE, 
+                         paste(SAMPLENAMES, collapse = "_"),
+                         paste0("cOTFBS", cO_TFBS), 
+                         sep = '_')
+```
+
+### Load in data
+
+#### TFBS & uniqueness data
+```{r load data - TFBS, message=FALSE}
+if(!exists("MotDBf")){
+  MotDBf <- readRDS(paste0(WD, INDIR_rds, 'mapped_jaspar2018_ChIP_score10_inBaits_BANP_all_locus_NONunique.rds'))
+  MotDBf_tbl <- as_tibble(MotDBf) %>%
+    mutate(motif = str_replace_all(name, "::", "_")) %>%
+    select(-name)
+}
+```
+
+#### CMH test data
+```{r load data - CMH data, message=FALSE}
+# CMH single molecule data
+CMH_tbl_min2 <- readRDS(paste0(WD, INDIR, 'TF_CMH_matrix_', 
+                               SAMPLES_l[[SAMPLE_OI]][1], '_', paste(SAMPLEREPS[[SAMPLE_OI]][-1], collapse = '_'), 
+                               '_TF_jaspar2018_BANP_inM', WDW_SIZE, '_Co', cO_TFBS, '_pc', ADD,'.rds'))
+```
+
+#### ChromHMM data
+```{r}
+# chromHMM <- readRDS(paste0('/g/krebs/kreibich/analysis/SMF/TF/rds/chromHMM_30bp_TFBS_with_clusters.rds')) %>% 
+#   select(bin, chromHMM, chromHMMcl) %>% 
+#   dplyr::rename(TFBS = bin)
+```
+
+## Data transformation
+### Methylation and coverage data
+```{r}
+# input_cov_tbl_l <- lapply(seq(3), function(i) {
+  # i = 1
+  x1 <- readRDS(paste0(WD, INDIR, 'TF_Coverage_matrix_', 
+                       SAMPLES_l[[SAMPLE_OI]][1], '_', paste(SAMPLEREPS[[SAMPLE_OI]][-1], collapse = '_'), 
+                       '_TF_jaspar2018_BANP_inM', WDW_SIZE, '.rds'))
+
+  x1.2 <- x1 %>% 
+    add_count(sample, bin, state, name = "state_count") %>% 
+    filter(state_count == 1, value == 0) %>% 
+    select(1:3) %>% 
+    mutate(value = 1, n = 0)
+  
+  x1.3 <- x1 %>% 
+    full_join(., x1.2)
+  
+  #Count reads per fraction per state (me/unme) 
+  x2 <- x1.3 %>% 
+    dplyr::rename(TFBS = bin,
+                  fraction = state,
+                  cov_value = n)
+  
+  #Count reads per fraction
+  x3 <- x2 %>% 
+    add_count(sample, TFBS, fraction, wt = cov_value, name = "cov_fraction")
+  
+  #Count reads per TFBS
+  x4 <- x3 %>% 
+    add_count(sample, TFBS, wt = cov_value, name = "cov_TFBS")
+  
+  #Calculate methylation per fraction
+  x5 <- x4 %>% 
+    filter(value == 1) %>% 
+    mutate(me_fraction = cov_value/cov_fraction) %>% 
+    group_by(sample, TFBS) %>% 
+    mutate(me_TFBS = sum(cov_value)/cov_TFBS) %>% 
+    ungroup() %>% 
+    select(-c(value, cov_value)) %>% 
+    distinct(sample, TFBS, fraction, .keep_all = TRUE)
+  
+  #Keep only bin that are covered by at least two replicates
+  x5.1 <- x5 %>% 
+    distinct(sample, TFBS) %>% 
+    count(TFBS) %>% 
+    filter(n > 1) %>% 
+    pull(TFBS) 
+  
+  x6 <- x5 %>% 
+      filter(TFBS %in% x5.1)
+  
+  #Filter by bin coverage cutoff of 30 for each replicate & Separate sample & replicate
+   x6.1 <- x6 %>% 
+    filter(cov_TFBS >= cO_TFBS) %>% 
+    mutate(replicate = str_extract(sample, "R.{1,3}"),
+           sample = str_extract(sample, "(?<=SMF_MM_)\\w{1,}(?=_R.{1,})"))
+
+  #REPLICATE INFO: Calculate weighted mean of methylation & mean of coverage
+    x6.2 <- x6.1 %>% 
+      distinct(TFBS, replicate, .keep_all = TRUE) %>% 
+      group_by(TFBS) %>% 
+      mutate(mean_cov_TFBS = mean(cov_TFBS, na.rm = T),
+             wmean_me_TFBS = weighted.mean(me_TFBS, cov_TFBS, na.rm = T)) %>% 
+      ungroup() %>% 
+      select(contains("TFBS"), contains("ratio"))
+    
+    x7 <- x6.1 %>% 
+      left_join(., x6.2) %>% 
+      group_by(TFBS, fraction) %>% 
+      mutate(wmean_me_fraction = weighted.mean(me_fraction, cov_fraction, na.rm = T),
+             mean_cov_fraction = mean(cov_fraction, na.rm = T),
+             ratio_mean_cov_fraction = mean_cov_fraction/mean_cov_TFBS) %>% 
+      ungroup() %>% 
+      select(-c(starts_with("cov"), starts_with("me_"), replicate)) %>% 
+      distinct(TFBS, fraction, .keep_all = T) 
+  
+  #Add sample name to column names
+  x8 <- x7 %>% 
+    pivot_wider(names_from = "sample", values_from = contains("mean"), names_glue = "{sample}_{.value}")
+
+x10 <- x8
+
+x10$TFBS %>% unique() %>% length() #ES 71,407 | C2C12 54,970 | MEL 58,118 | NP 59,018
+```
+
+  
+#### Filter for coverage and bound
+```{r}
+COI <- names(x10)[grepl("mean_cov_fraction", names(x10))][1]
+TFBS_cO_fraction_not_met <- x10 %>% 
+    filter(fraction %in% c("bound", "closed")) %>% 
+    filter(get(COI) < cO_fraction) %>% 
+    pull(TFBS) %>% 
+    unique() #ES 42,024 | C2C12 18,006
+
+COI <- names(x10)[grepl("mean_cov_fraction", names(x10))][1]
+COI <- paste0(COI, "_bound")
+TFBS_bound <- x10 %>% 
+  pivot_wider(names_from = "fraction", values_from = contains("_fraction"), names_sep = "_") %>% 
+  filter(get(COI) >= cO_BOUND) %>% 
+  pull(TFBS) %>% 
+  unique()
+
+COI <- names(x10)[grepl("mean_cov_TFBS", names(x10))]
+x13 <- x10 %>% 
+  # Filter for overall coverage  
+  filter(get(COI) >= cO_TFBS) %>% 
+  # Filter for fraction coverage  (bound | closed)
+  filter(!(TFBS %in% TFBS_cO_fraction_not_met)) %>% 
+  # Filter for 5% bound
+  filter(TFBS %in% TFBS_bound)
+
+x13$TFBS %>% unique() %>% length() #ES 5,334 | C2C12 1,481 | MEL 2,033 | NP 2,249
+```
+
+### Add other data
+```{r}
+x14 <- x13 %>% 
+  #Add CMH tibble
+  left_join(., CMH_tbl_min2) %>% 
+  #Add TFBS & motif cluster info
+  left_join(., MotDBf_tbl) %>% 
+  filter(!is.na(seqnames))# %>% 
+  #Add ChromHMM
+  # left_join(., chromHMM)
+  
+x14$TFBS %>% unique() %>% length() #ES 5,251 | C2C12 1,454 | MEL 2,014 | NP 2,232
+```
+
+
+### Annotate state
+```{r}
+# Get intermediately methylated data and recreate states
+COI <- names(x14)[grepl("mean_me_TFBS", names(x14))]
+data_iMe <- x14 %>% 
+  filter(!is.na(COR)) %>% 
+  filter(dplyr::between(get(COI), AVME.i.1, AVME.i.2)) %>% 
+  mutate(state2 = case_when(
+                      COR <= COR.i.antago & pval < PVAL.i ~ "antagonist",
+                      COR >= COR.i.ago & pval < PVAL.i ~ "agonist",
+                      dplyr::between(COR, COR.i.neut.1, COR.i.neut.2) ~ "neutral+",
+                      TRUE ~ "neutral")) %>% 
+  mutate(state = case_when(
+                      state2 == "neutral+" ~ "neutral", 
+                      TRUE ~ state2)) %>% 
+  mutate(state_crude = case_when(
+                      COR <= COR.i.antago ~ paste("COR <", COR.i.antago),
+                      COR > COR.i.antago ~ paste("COR >", COR.i.antago)))
+
+# Get NOT intermediately methylated data and create states
+data_NOTiMe <- x14 %>% 
+  filter(get(COI) < AVME.i.1 | get(COI) > AVME.i.2) %>% 
+  mutate(state2 = case_when(
+                    get(COI) < AVME.i.1 ~ "unmethylated",
+                    get(COI) > AVME.i.2 ~ "fully methylated"),
+         state = state2,
+         state_crude = state2)
+
+#Combine 
+datatbl <- rbind(data_iMe, data_NOTiMe) %>% 
+  mutate(state = factor(state, levels = LEVELS_state),
+         state2 = factor(state2, levels = LEVELS_state2),
+         state_crude = factor(state_crude, levels = LEVELS_state_crude)) %>% 
+  mutate(fraction = factor(fraction, levels = c("bound", "closed", "accessible"))) %>% 
+  mutate(across(contains("mean"), round, 3))
+
+datatbl$TFBS %>% unique() %>% length() #ES 5,251 | C2C12 1,454 | MEL 2,014 | NP 2,232
+
+datatbl %>% summary()
+```
+
+### Save final table
+```{r}
+#Save final data table
+saveRDS(datatbl, paste0(WD, OUTDIR, FINAL_TBL_NAME, '.rds'))
+
+#As GRange object
+suppressPackageStartupMessages(library(plyranges))
+datatbl_gr <- as_granges(datatbl)
+saveRDS(datatbl_gr, paste0(WD, OUTDIR, FINAL_TBL_NAME, '_gr.rds'))
+```

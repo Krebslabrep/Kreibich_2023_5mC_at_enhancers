@@ -1,0 +1,4 @@
+FileName	SampleName
+/g/krebs/kreibich/HTS/SMF/MM/aln/aln_rmdup/SMF_MM_ES_NO_R1_rmdup.bam	SMF_MM_ES_NO_R1
+/g/krebs/kreibich/HTS/SMF/MM/aln/aln_rmdup/SMF_MM_ES_NO_R2_rmdup.bam	SMF_MM_ES_NO_R2
+/g/krebs/kreibich/HTS/SMF/MM/aln/aln_rmdup/SMF_MM_ES_NO_R5a6_rmdup.bam	SMF_MM_ES_NO_R5a6

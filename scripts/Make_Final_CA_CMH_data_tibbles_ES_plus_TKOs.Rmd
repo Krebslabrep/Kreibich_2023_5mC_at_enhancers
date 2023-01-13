@@ -1,0 +1,218 @@
+---
+title: "Chromatin accessibility vs 5mC analysis - Making of final CMH data table - ES WT and DNMT/TET TKOs"
+author: "Elisa Kreibich"
+date: "23/03/2022"
+output: 
+  html_notebook:
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+This script combines the Final data tibbles CA from ES WT, DNMT TKO and TET TKO and calculates the changes in chromatin accessibility (CA) and 5mC.  
+The words CpG/NWCGW and GpC/DGCHN are used interchangeably in this script.  
+
+\
+
+### Input
+**Files needed to run this script and which scripts to run to create those:**  
+
+| Input file name | Information | Script to create |
+|:----------------|:------------|:-----------------|
+ Final_data_tibble_CA_***DATE*** _*WT-SAMPLE* _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF***.rds | WT Final tibble with CA, 5mC, CMH and additional info withOUT fractions  | Make_Final_CG_CMH_data_tibbles.Rmd  | 
+Final_data_tibble_CA_***DATE*** _*DNMTTKO-SAMPLE* _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF***.rds | DNMT TKO Final tibble with CA and 5mC info withOUT fractions  | Make_Final_CG_CMH_data_tibbles_TKOs.Rmd  |  
+| Final_data_tibble_CA_***DATE*** _*TETTKO-SAMPLE* _cObin ***BINCOVERAGECUTOFF***_cOCMH***CMHCOVERAGECUTOFF***.rds | TET TKO Final tibble with CA and 5mC info withOUT fractions  | Make_Final_CG_CMH_data_tibbles_TKOs.Rmd  |  
+
+\
+
+### Output
+**Create final data tibbles:**  
+
+* Final coverage and methylation tibble WITH WT Cochran-Mantel-Haenzsel test results - including states (antagonist/neutral/ICR) - with changes in CA and 5mC in TET TKO and DNMT TKO  
+* Final coverage and methylation tibble WITH WT Cochran-Mantel-Haenzsel test results - including states (antagonist/neutral/ICR) - with changes in CA and 5mC in TET TKO and DNMT TKO - as Grange object  
+
+\
+
+### Tibble information
+**The final tibbles contain the following columns/ information:**   
+ 
+ * bin = bin number 
+ * *WT-SAMPLE*_mean_cov_bin = mean coverage per bin (of center CpG)  
+ * *WT-SAMPLE*_wmean_me_bin = weighted mean 5mC per bin  
+ * *WT-SAMPLE*_mean_acc_cov_bin = mean coverage per bin (of all GpCs)  
+ * *WT-SAMPLE*_wmean_acc_bin = weighted mean chromatin accessibility (CA) per bin  
+ * pval = pvalue of Cochran-Mantel-Haenszel (CMH) test  
+ * COR = common odds ratio of CMH test  
+ * NWCGW = number of center CpG (from all NWCGWs)  
+ * ICR = imprinting control regions annotation [TRUE|FALSE]   
+ * chromHMM = chrommHMM annotation  
+ * chromHMMcl = chrommHMM cluster annotation  
+ * state = normal state definition (antagonist | neutral | ICR)  
+ * state2 = stringent state definition (antagonist | neutral | neutral+ | ICR) 
+ * state0 = first state definitin - without ICR annotation (antagonist | neutral)
+ * *DNMTTKO-SAMPLE*_mean_cov_bin = mean coverage per bin (of center CpG)  
+ * *DNMTTKO-SAMPLE*_mean_acc_cov_bin = mean coverage per bin (of all GpCs)  
+ * *DNMTTKO-SAMPLE*_wmean_acc_bin = weighted mean chromatin accessibility (CA) per bin 
+ * *TETTKO-SAMPLE*_mean_cov_bin = mean coverage per bin (of center CpG)  
+ * *TETTKO-SAMPLE*_wmean_me_bin = weighted mean 5mC per bin  
+ * *TETTKO-SAMPLE*_mean_acc_cov_bin = mean coverage per bin (of all GpCs)  
+ * *TETTKO-SAMPLE*_wmean_acc_bin = weighted mean chromatin accessibility (CA) per bin  
+ * ETKO_me_change = 5mC change between WT and DNMT TKO (== -*WT-SAMPLE*_wmean_me_bin)  
+ * ETET_me_change = 5mC change between WT and TET TKO (TETTKO_NO_wmean_me_bin - ES_NO_wmean_me_bin)  
+ * ETKO_acc_change = CA change between WT and DNMT TKO (TKO_DE_wmean_acc_bin - ES_NO_wmean_acc_bin)  
+ * ETET_acc_change = CA change between WT and TET TKO (TETTKO_NO_wmean_acc_bin - ES_NO_wmean_acc_bin)  
+         
+ 
+The tibbles withOUT fraction information don't contain the fraction columns and the remaining bin information are **unique**. 
+
+\
+
+### State definitions
+**States are defined as followed:**  
+
+* **antagonist:** COR <= 0.5 | pval < 0.05 [| ICR == FALSE]  
+* **neutral:** COR > 0.5 [| ICR == FALSE]  
+* **neutral+:** COR > 0.9 < 1.1 | ICR == FALSE 
+* **agonist:** wmean_me_bin > 0.1 < 0.6 | COR >= 2 | pval < 0.05 [| ICR == FALSE]   
+* **ICR:** ICR == TRUE  
+
+\
+
+### Additional information on this version:  
+
+* 101 bp collection window around CpG  
+* 10x coverage cutoff per bin for NWCGW and DGCHN methylation  
+* 30x coverage cutoff for SM analysis  
+* bin most be covered by at least 2 replicates  
+* average methylation (\*\_wmean_me\_\*) == weighted mean (wmean) of all replicates  
+* average accessibility (\*\_wmean_acc\_\*) == mean of GpC methylation in bin + weighted mean (wmean) of all replicates  
+* 5mC change WT vs DNMT TKO == minus *WT-SAMPLE*_wmean_me_bin 
+* all other changes are subtraction (TKO - WT)  
+
+\
+
+# Data Analysis
+## Set environment
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r load libraries}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_CA.R'))
+```
+
+### Set arguments
+```{r arguments}
+DATE            <- Sys.Date()
+OUTDIR          <- 'data_results/'
+INDIR           <- 'data_results/'
+INDIR_rds       <- 'data/'
+
+SAMPLENAMES_1   <- c("SMF_MM_ES_NO_R1", "SMF_MM_ES_NO_R2", "SMF_MM_ES_NO_R5a6")
+SAMPLENAMES_2   <- c("SMF_MM_TKO_DE_R1a2", "SMF_MM_TKO_DE_R3a4", "SMF_MM_TKO_DE_R5a6")
+SAMPLENAMES_3   <- c("SMF_MM_TETTKO_NO_R1", "SMF_MM_TETTKO_NO_R2")
+
+SAMPLES <- c("ES_NO", "TKO_DE", "TETTKO_NO")                #Short versions of samples names used in the output Final tibble files
+INPUT_DATES <- c("2022-10-21", "2022-10-24", "2022-10-21")  #Dates of Final tibble creation for the three samples separately
+
+#Sample of interest for this script
+# SOI           <- SAMPLENAMES_1
+# SOI_REPS      <- str_extract(SOI[-1], pattern = "R.{1,3}")
+
+#Final file names
+FINAL_TBL_NAME  <- paste('Final_data_tibble_CA', DATE, 
+                         paste(SAMPLES, collapse = '_'), 
+                         paste0("cObin", cO_bin), 
+                         paste0("cOCMH", cO_CMH),
+                         sep = '_')
+```
+
+### Load data
+#### Bin GRanges
+```{r}
+# CpGs in bins
+bin_gr <- readRDS(paste0(WD, INDIR_rds,'CGs_over_baits_', WDW_SIZW,'bp.rds'))
+bin_gr$bin <- names(bin_gr)
+bin_gr <- as_tibble(bin_gr)
+```
+
+#### Data tibbles
+```{r}
+# WT
+SOI       <- SAMPLENAMES_1
+SOI_REPS  <- str_extract(SOI[-1], pattern = "R.{1,3}")
+INPUT_1   <- paste0(WD, INDIR, paste('Final_data_tibble_CA', INPUT_DATES[1], 
+                         SOI[1], paste(SOI_REPS, collapse = '_'), 
+                         paste0("cObin", cO_bin), 
+                         paste0("cOCMH", cO_CMH),
+                         sep = '_'),
+                    '_states.rds')
+
+# DNMT TKO
+SOI       <- SAMPLENAMES_2
+SOI_REPS  <- str_extract(SOI[-1], pattern = "R.{1,3}")
+INPUT_2   <- paste0(WD, INDIR, paste('Final_data_tibble_CA', INPUT_DATES[1], 
+                         SOI[1], paste(SOI_REPS, collapse = '_'), 
+                         paste0("cObin", cO_bin), 
+                         sep = '_'),
+                    '.rds')
+
+# TET TKO
+SOI       <- SAMPLENAMES_3
+SOI_REPS  <- str_extract(SOI[-1], pattern = "R.{1,3}")
+INPUT_3   <- paste0(WD, INDIR, paste('Final_data_tibble_CA', INPUT_DATES[1], 
+                         SOI[1], paste(SOI_REPS, collapse = '_'), 
+                         paste0("cObin", cO_bin), 
+                         sep = '_'),
+                    '.rds')
+
+# Combine tibbles
+data <- readRDS(INPUT_1) %>% 
+  left_join(., readRDS(INPUT_2)) %>% 
+  left_join(., readRDS(INPUT_3))
+```
+
+
+## Calculate changes
+
+```{r}
+data_tbl <- data %>% 
+  mutate(ETKO_me_change = -ES_NO_wmean_me_bin,
+         ETET_me_change = TETTKO_NO_wmean_me_bin - ES_NO_wmean_me_bin,
+         ETKO_acc_change = TKO_DE_wmean_acc_bin - ES_NO_wmean_acc_bin,
+         ETET_acc_change = TETTKO_NO_wmean_acc_bin - ES_NO_wmean_acc_bin
+         )
+
+FINAL_FILENAME <- paste0(WD, OUTDIR, FINAL_TBL_NAME, '_states.rds')
+saveRDS(data_tbl, FINAL_FILENAME)
+message(FINAL_FILENAME, ' saved.')
+```
+
+
+## Make GRange object
+```{r}
+library(plyranges)
+
+data_tbl_gr <- left_join(data_tbl, bin_gr) %>% 
+  select(seqnames, start, end, width, strand, everything()) %>% 
+  as_granges()
+
+FINAL_FILENAME <- paste0(WD, OUTDIR, FINAL_TBL_NAME, '_states_gr.rds')
+
+saveRDS(data_tbl_gr, FINAL_FILENAME)
+message(FINAL_FILENAME, ' saved.')
+```

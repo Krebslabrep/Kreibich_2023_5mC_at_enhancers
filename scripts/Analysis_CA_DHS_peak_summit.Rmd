@@ -1,0 +1,414 @@
+---
+title: "DHSpeaks in regions analysis - plot for manuscript"
+author: "Elisa Kreibich"
+date: "24/03/2022"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: hide
+editor_options:
+  chunk_output_type: inline
+  # html_document:
+  #   toc: true
+  #   toc_float: true
+  #   code_folding: hide
+---
+**Disclaimer about nomenclature**  
+In the manuscript, we call the different states "sites with xyz 5mC-CA-association". Here, we call them in their original nomenclature:  
+
+* antagonist = negative 5mC-CA-association  
+* neutral = no 5mC-CA-association  
+* agonist = positive 5mC-CA-association  
+
+
+# Introduction
+### Aim
+Analyse location of antagonist/ neutral sites in relation to DNase-hypersensitive sites.  
+
+# Data Analysis
+## Set environment
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, bootstrap.show.code = FALSE, warning = FALSE, message = FALSE)
+```
+```{r}
+WD = '/g/krebs/kreibich/Kreibich_2023_5mC_at_enhancers/'
+```
+
+### Load libraries
+```{r setup, include=FALSE}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(QuasR))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(patchwork))
+suppressPackageStartupMessages(library(plyranges))
+suppressPackageStartupMessages(library(genomation))
+
+source(paste0(WD, 'scripts/utilities/COLORS.R'))
+#Load arguments
+source(paste0(WD, 'scripts/utilities/Input_arguments_CA.R'))
+```
+
+## Setup
+### Set arguments
+```{r arguments}
+INDIR_rds   <- 'data/'
+INDIR       <- 'data_results/'
+OUTDIR_rds  <- 'data_results/'
+OUTDIR      <- 'data_results/plots/'
+dir.create(OUTDIR, showWarnings = F)
+
+DATE            <- Sys.Date()
+
+SAMPLENAMES_1   <- c("SMF_MM_ES_NO_R1", "SMF_MM_ES_NO_R2", "SMF_MM_ES_NO_R5a6")
+
+#Sample of interest for this script
+SOI             <- SAMPLENAMES_1
+SOI_REPS        <- str_extract(SOI[-1], pattern = "R.{1,3}")
+INPUT_DATE      <- c("2022-06-23")  #Dates of Final tibble creation 
+
+INPUT           <- paste('Final_data_tibble_CA', INPUT_DATE, 
+                         SOI[1], paste(SOI_REPS, collapse = '_'), 
+                         paste0("cObin", cO_bin), 
+                         paste0("cOCMH", cO_CMH), 
+                         "states_gr.rds",
+                         sep = '_')
+
+#DHS peaks (DOWNLOAD FROM ENCODE)
+DHS <- c(
+  './E14-DHS18505.peaks.fdr0.01.mm10.bed',
+  './E14-DHS21450.peaks.fdr0.01.mm10.bed'
+)
+
+#DHS bam file (DOWNLOAD AND ALIGN DNase-seq data)
+Qinput <- './QuasR_aligned_files_DNAse-seq.txt'
+```
+
+### Load SMF data
+```{r}
+SMF <- readRDS(paste0(WD, INDIR, INPUT))
+
+ROI <- SMF %>% 
+  filter(!is.na(COR)) %>% 
+  filter(grepl("nhancer", chromHMMcl))
+# ROI_region <- resize(ROI, width = 5000, fix = "center")
+ROI_CpG <- resize(ROI, width = 1, fix = "center") %>%
+  as_tibble() %>% 
+  dplyr::select(bin, start) %>% 
+  dplyr::rename(CpG_location = start)
+```
+
+### Load DHS peaks
+```{r}
+DHS_data_l <- lapply(DHS, readBed)
+DHS_data <- c(DHS_data_l[[1]], DHS_data_l[[2]])
+DHS_data <- GenomicRanges::reduce(DHS_data)
+names(DHS_data) <- paste0("peak_", seq(length(DHS_data)))
+
+DHS_data %>% 
+  as_tibble() %>% 
+  ggplot(aes(width)) +
+  geom_histogram(binwidth = 10)
+
+DHS_data_1bp <- resize(DHS_data, width = 1, fix = "center")
+DHS_data_1bp$peaks <- names(DHS_data_1bp)
+
+DHS_data_1bp <- as_tibble(DHS_data_1bp) %>% 
+  dplyr::select(peaks, start) %>% 
+  dplyr::rename(peak_location = start)
+```
+
+### Load DHS bam files
+```{r}
+DHS_bam <- qAlign(sampleFile = Qinput, 
+               paired = 'no',
+               genome = "BSgenome.Mmusculus.UCSC.mm10", 
+               aligner = 'Rbowtie')
+DHS_bam@aligner <- "Rbowtie"
+DHS_bam <-DHS_bam[3:4]
+mapped_reads <- alignmentStats(DHS_bam)[,2]
+```
+
+### Useful functions
+```{r}
+# Subset GR and add information
+  subsetByOverlaps.addInfo <- function(query, subject, infoname) {
+    hits <- findOverlaps(query, subject)
+    peaks <- CharacterList(split(names(subject)[subjectHits(hits)],
+                               queryHits(hits)))
+    DHS_ROI_region <- subsetByOverlaps(query, subject)
+    mcols(DHS_ROI_region) <- DataFrame(mcols(DHS_ROI_region), peaks)
+    
+    DHS_ROI_region_tbl <- as_tibble(DHS_ROI_region) %>%
+      mutate_at(vars(peaks), as.character)
+    
+    peaks_ov_count <- DHS_ROI_region_tbl %>% 
+      mutate(count = str_count(peaks, infoname)) %>% 
+      pull(count) %>% 
+      max()
+    
+    DHS_ROI_region_tbl_l <- lapply(seq(peaks_ov_count), function(x){
+      DHS_ROI_region_tbl %>% 
+        mutate(peaks = str_extract_all(peaks, infoname),
+               peaks = map_chr(peaks, nth, x)) %>% 
+        filter(!is.na(peaks))
+    })
+    DHS_ROI_region_tbl2 <- bind_rows(DHS_ROI_region_tbl_l) 
+    return(DHS_ROI_region_tbl2)
+  }
+```
+
+### Analysis
+#### Distance between ROIs and nearest DHS peaks
+```{r}
+WIDTH = 10000
+ROI_region <- resize(ROI, width = WIDTH, fix = "center")
+
+DHS_ROI_region_tbl <- subsetByOverlaps.addInfo(ROI_region, DHS_data, "peak_\\d+") %>% 
+  right_join(., as_tibble(ROI_region)) %>%
+  left_join(., DHS_data_1bp) %>% 
+  left_join(., ROI_CpG) %>% 
+  mutate(DHS_CpG_distance = CpG_location - peak_location)
+
+DHS_ROI_region_tbl2 <- DHS_ROI_region_tbl %>% 
+  mutate(abs_DHS_CpG_distance = abs(DHS_CpG_distance)) %>% 
+  arrange(abs_DHS_CpG_distance) %>% 
+  distinct(bin, .keep_all = T) 
+
+no_peaks <- DHS_ROI_region_tbl2 %>% filter(is.na(peaks)) %>% count()
+no_peaks_state2 <- DHS_ROI_region_tbl2 %>% filter(is.na(peaks)) %>% count(state2)
+
+message("Number of CpG sites without DHS peak within ", WIDTH/1000, " kb = ", no_peaks, 
+        "\n seperated by state:")
+no_peaks_state2
+```
+
+``` {r}
+DHS_ROI_region_tbl2 %>% 
+  ggplot(aes(DHS_CpG_distance, color = state2, fill = state2)) +
+  geom_density(alpha = 0.3) +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "distance of nearest DHS peak to CpG [bp]")
+
+DHS_ROI_region_tbl2 %>% 
+  ggplot(aes(DHS_CpG_distance, color = state2, fill = state2)) +
+  geom_density(alpha = 0.7) +
+  facet_wrap(~state2, scales = "free_y") +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "distance of nearest DHS peak to CpG [bp]")
+```
+
+
+
+#### Numbers of close distance to DHS
+```{r}
+MAX_DIS <- 500
+BREAKS <- c("far (>500bp)", "close (<500bp)")
+names(BREAKS) <- c("far", "close")
+
+DHS_ROI_region_tbl2 %>% 
+  mutate(distance = case_when(abs_DHS_CpG_distance < MAX_DIS ~ "close",
+                              TRUE ~ "far")) %>% 
+  count(state2, distance) %>% 
+  pivot_wider(names_from = "distance", values_from = n) %>% 
+  mutate(sum = close + far) %>% 
+  pivot_longer(cols = c(close, far), names_to = "distance", values_to = "n") %>% 
+  mutate(ratio = n/sum*100) %>% 
+  ggplot(aes(state2, ratio, fill = distance)) +
+  geom_col() +
+  scale_fill_discrete(labels = BREAKS)
+```
+#### Focus on sites with close DHS (<500bp)
+##### Density
+**Close to DHS peak (<500bp)**
+```{r}
+MAX_DIS <- 500
+DHS_ROI_region_tbl3 <- DHS_ROI_region_tbl2 %>% 
+  filter(abs_DHS_CpG_distance <= MAX_DIS)
+
+DHS_ROI_region_tbl3  %>% 
+  ggplot(aes(DHS_CpG_distance, color = state2, fill = state2)) +
+  geom_density(alpha = 0.3) +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "distance of nearest DHS peak to CpG [bp]")
+
+DHS_ROI_region_tbl3  %>% 
+  ggplot(aes(DHS_CpG_distance, color = state2, fill = state2)) +
+  geom_histogram(alpha = 0.3) +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "distance of nearest DHS peak to CpG [bp]") +
+  facet_wrap(~state2, scales = "free_y")
+```
+
+**Within DHS peak (<150bp)**
+``` {r}
+MAX_DIS2 <- 150
+DHS_ROI_region_tbl4 <- DHS_ROI_region_tbl2 %>% 
+  filter(abs_DHS_CpG_distance <= MAX_DIS2)
+
+DHS_ROI_region_tbl3  %>% 
+  ggplot(aes(DHS_CpG_distance, color = state2, fill = state2)) +
+  geom_histogram(alpha = 0.3) +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "distance of nearest DHS peak to CpG [bp]") +
+  facet_wrap(~state2, scales = "free_y")
+```
+
+##### Correlate density with antagonism
+```{r}
+DHS_ROI_region_tbl3 %>% 
+  # filter(state2 == "antagonist") %>% 
+  ggplot(aes(DHS_CpG_distance, -log(COR))) +
+  geom_point(alpha = 0.3, size = 1) +
+  facet_wrap(~state2, scales = "free_y")
+
+DHS_ROI_region_tbl3 %>% 
+  # filter(state2 == "antagonist") %>% 
+  ggplot(aes(abs_DHS_CpG_distance, -log(COR))) +
+  geom_point(alpha = 0.3, size = 1) +
+  facet_wrap(~state2, scales = "free_y")
+
+```
+
+Slight correlation between common odds ratio and distance to DHS peak summit. At least for the antagonist sites.
+
+\
+
+#### Distance to DHS related to accessibility
+```{r}
+distance_group_names <- c("<25bp", "25-75bp", "75-150bp", "150-250bp", "250-500bp", ">500bp")
+# Group by distance to summit
+DHS_ROI_region_tbl4 <- DHS_ROI_region_tbl2 %>% 
+  filter(!is.na(abs_DHS_CpG_distance)) %>% 
+  filter(state != "ICR") %>% 
+  mutate(distance_group = case_when(
+    abs_DHS_CpG_distance > 500 ~ distance_group_names[6],
+    dplyr::between(abs_DHS_CpG_distance, 250, 500) ~ distance_group_names[5],
+    dplyr::between(abs_DHS_CpG_distance, 150, 250) ~ distance_group_names[4],
+    dplyr::between(abs_DHS_CpG_distance, 75, 150) ~ distance_group_names[3],
+    dplyr::between(abs_DHS_CpG_distance, 25, 75) ~ distance_group_names[2],
+    abs_DHS_CpG_distance <= 25 ~ distance_group_names[1]
+  )) %>% 
+  mutate(distance_group = factor(distance_group, levels = distance_group_names))
+
+DHS_ROI_region_tbl4 %>%   
+  ggplot(aes(DHS_CpG_distance, ES_NO_wmean_acc_bin, color = state2)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  # scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "distance of nearest DHS peak to CpG [bp]",
+       y = "accessibility") +
+  facet_wrap(~state2, scales = "free_y", ncol = 1) +
+  ylim(0,1)
+
+DHS_ROI_region_tbl4 %>%  
+  filter(abs_DHS_CpG_distance <= 500) %>% 
+  ggplot(aes(DHS_CpG_distance, ES_NO_wmean_acc_bin, color = state2)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  # scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "distance of nearest DHS peak to CpG [bp]",        
+       y = "accessibility") +
+  facet_wrap(~state2, scales = "free_y", ncol = 1) +
+  ylim(0,1)
+
+DHS_ROI_region_tbl4 %>%  
+  filter(abs_DHS_CpG_distance <= 500) %>% 
+  ggplot(aes(abs_DHS_CpG_distance, ES_NO_wmean_acc_bin, color = state2)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "grey") +
+  scale_color_manual(values = COLORS_STATE_v5s) +
+  # scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "absolute distance of nearest DHS peak to CpG [bp]",        
+       y = "accessibility") +
+  facet_wrap(~state2, scales = "free_y", ncol = 1) +
+  ylim(0,1)
+
+DHS_ROI_region_tbl4 %>%   
+  ggplot(aes(distance_group, ES_NO_wmean_acc_bin, fill = state2)) +
+  geom_violin(show.legend = F) +
+  geom_boxplot(fill = "white", alpha = 0.5, outlier.alpha = 0, width = 0.3, coef = 0) +
+  # scale_color_manual(values = COLORS_STATE_v5s) +
+  scale_fill_manual(values = COLORS_STATE_v5s) +
+  labs(x = "absolute distance of nearest DHS peak to CpG [bp]",        
+       y = "accessibility") +
+  facet_wrap(~state2, scales = "free_y", ncol = 1, strip.position = "right") +
+  ylim(0,1)
+
+```
+\
+
+#### CpG over DHS peak
+```{r}
+WDW <- 1000
+clusters <- makeCluster(2)
+SMF_covered_peaks <- DHS_ROI_region_tbl2 %>% pull(peaks)
+DHS_data$peaks <- names(DHS_data)
+DHS_data_covered <- DHS_data %>% filter(peaks %in% SMF_covered_peaks)
+DHS_data_covered_rs <- resize(DHS_data_covered, width = 1, fix = "center")
+DHS_profile <- qProfile(DHS_bam, DHS_data_covered_rs, clObj = clusters, upstream = WDW/2)
+stopCluster()
+
+DHS_profile_l <- lapply(seq(length(DHS_profile))[-1], function(x){
+  DHS_profile[[x]] %>% 
+    as_tibble(., rownames = "peaks") %>%
+    pivot_longer(cols = c(-peaks), names_to = "position", values_to = "count") %>% 
+    mutate(position = as.double(position))
+})
+names(DHS_profile_l) <- names(mapped_reads) %>% str_remove(., ":genome")
+DHS_profile_tbl <- bind_rows(DHS_profile_l, .id = "sample") 
+
+# saveRDS(DHS_profile_tbl, paste0(INPUT_DIR_rds, 'DHS_tibble_', SOI[1], '_', paste(SOI_REPS, collapse = '_'), 'qProfile_', WDW, 'bp_', DATE,'.rds'))
+```
+
+```{r}
+# DATE_DHS <- DATE
+# DHS_profile_tbl <- readRDS(paste0(INPUT_DIR_rds, 'DHS_tibble_', SOI[1], '_', paste(SOI_REPS, collapse = '_'), 'qProfile_', WDW, 'bp_', DATE_DHS,'.rds'))
+```
+
+```{r}
+p_DHS_peak <- DHS_profile_tbl %>% 
+  group_by(position) %>% 
+  summarise(count_mean = mean(count)) %>% 
+  ungroup() %>% 
+  mutate(count_mean_smoothed = caTools::runmean(count_mean, k = 10, endrule = "constant")) %>% 
+  ggplot(aes(position, count_mean_smoothed)) +
+  geom_line() +
+  labs(x = "distance to DHS peak [bp]",
+       y = "DHS read count density") +
+  theme_EK()
+
+MAX_DIS <- 500
+COLORS_STATE_v5xs <- COLORS_STATE_v5s[c(2,3)]
+plot_tbl <- DHS_ROI_region_tbl2 %>% 
+  filter(abs_DHS_CpG_distance <= MAX_DIS) %>%
+  filter(state2 != "ICR")%>%
+  filter(state2 != "neutral")
+
+p_CpG_location <- plot_tbl %>% 
+  ggplot(aes(DHS_CpG_distance, color = state2, fill = state2)) +
+  geom_density(alpha = 0.3) +
+  scale_color_manual(values = COLORS_STATE_v5xs) +
+  scale_fill_manual(values = COLORS_STATE_v5xs) +
+  labs(x = "distance to DHS peak [bp]",
+       y = "CpG location density", 
+       caption = paste0("n total = ", nrow(plot_tbl),
+                        "\nn neutral = ", nrow(filter(plot_tbl, state2 == "neutral+")),
+                        "\nn antagonist = ", nrow(filter(plot_tbl, state2 == "antagonist")))) +
+  theme_EK()
+
+p_final <- p_DHS_peak / p_CpG_location
+p_final
+# ggsave(plot = p_final, paste0(WD, OUTDIR, 'DHS_peak_CpG_location_density_plot_', DATE, '.pdf'), width = 6, height = 6)
+```
+
+
+
+
+
