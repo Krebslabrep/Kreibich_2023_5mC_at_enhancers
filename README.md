@@ -3,7 +3,7 @@
 # Kreibich et al., 2023 - The regulation of enhancers by DNA methylation
 
 # Introduction
-This GitHub repository contains all primary code to reproduce the main analyses for the publication "Single molecule footprinting identifies context-dependent regulation of enhancers by DNA methylation" [Kreibich et al., 2022, bioRxiv](https://doi.org/10.1101/2022.05.19.492653), from the [Krebs laboratory](https://www.embl.de/research/units/genome_biology/krebs/index.html).
+This GitHub repository contains all primary code to reproduce the main analyses for the publication "Single molecule footprinting identifies context-dependent regulation of enhancers by DNA methylation" [Kreibich et al., 2023, MolCell](https://doi.org/10.1016/j.molcel.2023.01.017), from the [Krebs laboratory](https://www.embl.de/research/units/genome_biology/krebs/index.html).
 
 In this publication, we use Single Molecule Footprinting (SMF) to measure chromatin accessibility (CA), transcription factor (TF) binding and endogenous DNA methylation (5mC) simultaneously at the same single DNA molecules. This enables us to analyze the molecular relationship between these gene regulatory features.  
 SMF is a high-throughput sequencing technology developed in the [Krebs laboratory](https://www.embl.de/research/units/genome_biology/krebs/index.html). It consists of marking accessible genomic cytosines in the GpC context using a exogenous methytransferase and subsequent bisulfite sequencing (BS). Consequently, GpCs protected by the binding of DNA-interacting proteins (e.g. TFs, nucleosomes, GTFs, etc.) will remain unmethylated, while the accessible cytosines will be methylated.
@@ -26,10 +26,10 @@ A more detailed schematic view of this analysis can be found in Figure S1H of th
 ![Kreibich et al, 2023. Figure S1H - Schematic description of CA analysis strategy](Figure_S1H_Analysis_scheme.png)
 
 **(2) Transcription factor binding site (TFBS) analysis**
-* Here, we center a 30 bp center bin at TFBS that contains at least one CpG. In addition 2 neighboring X bp bins up- and downstream are created. The GpC methylation within tose three bins is used to determine the binding state of the TFBS (TF bound, accessible, nucleosome bound).
+* Here, we center a 30 bp center bin at TFBS that contains at least one CpG. In addition, 2 neighboring X bp bins up- and downstream are created. The GpC methylation within tose three bins is used to determine the binding state of the TFBS (TF bound, accessible, nucleosome bound).
 * We then perform a Cochran-Mantel-Haenszel test to associate the CpG methylation of the center bin CpG with the TF bound or nucleosome bound fraction.
 * For TFBS the JASPAR 2018 database is used and curated using ChIP-seq data.
-* For more information on SMF analysis of TFBS, see [Kleinendorst and Barzaghi et al., 2022]() and [Soenmezer et al., 2022]().
+* For more information on SMF analysis of TFBS, see [Kleinendorst and Barzaghi et al., 2022](https://doi.org/10.1038/s41596-021-00630-1) and [Soenmezer et al., 2022](https://doi.org/10.1016/j.molcel.2020.11.015).
 
 # Information on scripts and data provided
 
@@ -230,7 +230,7 @@ Before starting running the script, you have to do the following:
 - Align the SMF data using QuasR (see below)  
 - Perform QCs  
 - Deduplicate (if genome-wide SMF data)  
-- Make a QuasR input file for the aligned data (see [example file](data/example/QuasR_aligned_files_ES_NO_R1_R2_R5a6_rmdup.txt)  
+- Make a QuasR input file for the aligned data (see [example file](data/example/QuasR_aligned_files_ES_NO_R1_R2_R5a6_rmdup.txt))  
 - Install R packages  
 - unzip zipped files in data directory  
 
@@ -255,4 +255,4 @@ For more details on SMF data preprocessing we refer to the computational steps o
 
 
 # Descriptions of the analyses
-More detailed descriptions of the individual analyses can be found in the methods section of the publication [Kreibich et al., 2022, bioRxiv](https://doi.org/10.1101/2022.05.19.492653).
+More detailed descriptions of the individual analyses can be found in the methods section of the publication [Kreibich et al., 2023, MolCell](https://doi.org/10.1016/j.molcel.2023.01.017).
